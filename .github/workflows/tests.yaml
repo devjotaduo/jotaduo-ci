@@ -34,9 +34,9 @@ jobs:
           TRIGGER_BRANCH: ${{ github.ref_name }}
           INPUT_REF: ${{ inputs.ref }}
         run: |
-          # Um push em run/pr-<número>-<commit> pede o teste do merge desse pull request.
+          # Um push em run/pr-<número>-<commit>-<execução>-<tentativa> pede o teste do merge desse pull request.
           if [ "$EVENT_NAME" = push ]; then
-            [[ "$TRIGGER_BRANCH" =~ ^run/pr-([0-9]+)-[0-9a-f]{40}$ ]] || { echo "Branch de disparo inválida."; exit 1; }
+            [[ "$TRIGGER_BRANCH" =~ ^run/pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]] || { echo "Branch de disparo inválida."; exit 1; }
             echo "ref=refs/pull/${BASH_REMATCH[1]}/merge" >> "$GITHUB_OUTPUT"
           else
             echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
