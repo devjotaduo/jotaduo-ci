@@ -1,29 +1,50 @@
 name: Tests
 
 on:
+  push:
+    branches:
+      - 'run/**'
   workflow_dispatch:
     inputs:
       ref:
         description: Branch, tag ou commit do repositório de origem
         required: true
         type: string
-      status_sha:
-        description: Commit do repositório de origem que recebe o status (opcional)
-        required: false
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ inputs.ref }}
+  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
   cancel-in-progress: true
 
-run-name: Tests ${{ inputs.ref }}
+run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - name: Resolve source ref
+        id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_BRANCH: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          # Um push em run/pr-<número>-<commit> pede o teste do merge desse pull request.
+          if [ "$EVENT_NAME" = push ]; then
+            [[ "$TRIGGER_BRANCH" =~ ^run/pr-([0-9]+)-[0-9a-f]{40}$ ]] || { echo "Branch de disparo inválida."; exit 1; }
+            echo "ref=refs/pull/${BASH_REMATCH[1]}/merge" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          fi
+
   tests:
     name: ${{ matrix.suite }}
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -53,22 +74,12 @@ jobs:
       NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
-      STATUS_URL: https://api.github.com/repos/devjotaduo/jotaduo-v0.01/statuses/${{ inputs.status_sha }}
-      STATUS_CONTEXT: hosted / ${{ matrix.suite }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: Report pending
-        if: inputs.status_sha != ''
-        env:
-          GH_TOKEN: ${{ secrets.SOURCE_STATUS_TOKEN }}
-        run: |
-          curl --fail --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$STATUS_URL" \
-            -d "{\"state\":\"pending\",\"context\":\"$STATUS_CONTEXT\",\"target_url\":\"$RUN_URL\"}" > /dev/null
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: devjotaduo/jotaduo-v0.01
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.plan.outputs.ref }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
           fetch-depth: 0
@@ -84,13 +95,17 @@ jobs:
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
       - name: Run ${{ matrix.suite }}
         run: ${{ matrix.command }}
-      - name: Report result
-        if: always() && inputs.status_sha != ''
+
+  cleanup:
+    needs: tests
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Delete trigger branch
         env:
-          GH_TOKEN: ${{ secrets.SOURCE_STATUS_TOKEN }}
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          state=failure
-          [ "$JOB_STATUS" = success ] && state=success
-          curl --fail --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$STATUS_URL" \
-            -d "{\"state\":\"$state\",\"context\":\"$STATUS_CONTEXT\",\"target_url\":\"$RUN_URL\"}" > /dev/null
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_BRANCH: ${{ github.ref_name }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$TRIGGER_BRANCH"
