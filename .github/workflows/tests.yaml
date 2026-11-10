@@ -7,6 +7,10 @@ on:
         description: Branch, tag ou commit do repositório de origem
         required: true
         type: string
+      status_sha:
+        description: Commit do repositório de origem que recebe o status (opcional)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -35,13 +39,13 @@ jobs:
           - suite: shared
             command: $YARN nx test twenty-shared --ci --maxWorkers=2 --coverage=false --skip-nx-cache --parallel=1
           - suite: frontend
-            command: $YARN nx test twenty-front --ci --maxWorkers=2 --coverage=false --skip-nx-cache --parallel=1
+            command: $YARN nx test twenty-front --ci --maxWorkers=4 --coverage=false --skip-nx-cache --parallel=1
           - suite: server
             command: $YARN nx run twenty-server:test:ci --skip-nx-cache --parallel=1
           - suite: ui
             command: |
               $YARN nx run-many --projects=twenty-ui --targets=check:ownership,test:exports --skip-nx-cache --parallel=1
-              $YARN workspace twenty-ui vitest run --project unit --maxWorkers=2
+              $YARN workspace twenty-ui vitest run --project unit --maxWorkers=4
     env:
       CI: 'true'
       NX_DAEMON: 'false'
@@ -49,7 +53,17 @@ jobs:
       NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      STATUS_URL: https://api.github.com/repos/devjotaduo/jotaduo-v0.01/statuses/${{ inputs.status_sha }}
+      STATUS_CONTEXT: hosted / ${{ matrix.suite }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Report pending
+        if: inputs.status_sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_STATUS_TOKEN }}
+        run: |
+          curl --fail --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$STATUS_URL" \
+            -d "{\"state\":\"pending\",\"context\":\"$STATUS_CONTEXT\",\"target_url\":\"$RUN_URL\"}" > /dev/null
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -70,3 +84,13 @@ jobs:
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
       - name: Run ${{ matrix.suite }}
         run: ${{ matrix.command }}
+      - name: Report result
+        if: always() && inputs.status_sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_STATUS_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          state=failure
+          [ "$JOB_STATUS" = success ] && state=success
+          curl --fail --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$STATUS_URL" \
+            -d "{\"state\":\"$state\",\"context\":\"$STATUS_CONTEXT\",\"target_url\":\"$RUN_URL\"}" > /dev/null
