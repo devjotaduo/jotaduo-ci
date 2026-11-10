@@ -1,0 +1,72 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag ou commit do repositório de origem
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ inputs.ref }}
+  cancel-in-progress: true
+
+run-name: Tests ${{ inputs.ref }}
+
+jobs:
+  tests:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: overlays
+            command: |
+              result=0
+              node packages/twenty-utils/overlays/overlays.mjs status || result=1
+              node packages/twenty-utils/overlays/overlays.mjs check --all || result=1
+              exit "$result"
+          - suite: shared
+            command: $YARN nx test twenty-shared --ci --maxWorkers=2 --coverage=false --skip-nx-cache --parallel=1
+          - suite: frontend
+            command: $YARN nx test twenty-front --ci --maxWorkers=2 --coverage=false --skip-nx-cache --parallel=1
+          - suite: server
+            command: $YARN nx run twenty-server:test:ci --skip-nx-cache --parallel=1
+          - suite: ui
+            command: |
+              $YARN nx run-many --projects=twenty-ui --targets=check:ownership,test:exports --skip-nx-cache --parallel=1
+              $YARN workspace twenty-ui vitest run --project unit --maxWorkers=2
+    env:
+      CI: 'true'
+      NX_DAEMON: 'false'
+      NX_NO_CLOUD: 'true'
+      NX_PARALLEL: '1'
+      NODE_OPTIONS: --max-old-space-size=6144
+      YARN: node .yarn/releases/yarn-4.18.1.cjs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: devjotaduo/jotaduo-v0.01
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install dependencies
+        if: matrix.suite != 'overlays'
+        run: $YARN install --immutable --check-cache
+      - name: Build shared dependencies
+        if: matrix.suite != 'overlays'
+        run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+      - name: Run ${{ matrix.suite }}
+        run: ${{ matrix.command }}
