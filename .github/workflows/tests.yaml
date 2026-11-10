@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
+      base: ${{ steps.ref.outputs.base }}
     steps:
       - name: Resolve source ref
         id: ref
@@ -35,11 +36,15 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
         run: |
           # Um push em run/pr-<número>-<commit>-<execução>-<tentativa> pede o teste do merge desse pull request.
+          # Com run/affected-pr-..., só os testes que o diff do pull request alcança.
           if [ "$EVENT_NAME" = push ]; then
-            [[ "$TRIGGER_BRANCH" =~ ^run/pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]] || { echo "Branch de disparo inválida."; exit 1; }
-            echo "ref=refs/pull/${BASH_REMATCH[1]}/merge" >> "$GITHUB_OUTPUT"
+            [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]] || { echo "Branch de disparo inválida."; exit 1; }
+            echo "ref=refs/pull/${BASH_REMATCH[2]}/merge" >> "$GITHUB_OUTPUT"
+            # O primeiro pai do commit de merge é a base do pull request.
+            if [ -n "${BASH_REMATCH[1]}" ]; then echo 'base=HEAD^1'; else echo 'base=full'; fi >> "$GITHUB_OUTPUT"
           else
             echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+            echo 'base=full' >> "$GITHUB_OUTPUT"
           fi
 
   tests:
@@ -74,6 +79,8 @@ jobs:
       NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      TEST_BASE: ${{ needs.plan.outputs.base }}
+      SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -83,18 +90,36 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Plan ${{ matrix.suite }}
+        id: plan
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          # Uma linha sem o seletor roda a suíte inteira pelo comando da matriz.
+          if [ -f "$SELECTOR" ]; then
+            scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE")
+          else
+            scope=legacy
+          fi
+          echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
       - name: Install dependencies
-        if: matrix.suite != 'overlays'
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
         run: $YARN install --immutable --check-cache
       - name: Build shared dependencies
-        if: matrix.suite != 'overlays'
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
       - name: Run ${{ matrix.suite }}
+        if: steps.plan.outputs.scope == 'legacy'
         run: ${{ matrix.command }}
+      - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
+        if: steps.plan.outputs.scope != 'legacy'
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
 
   cleanup:
     needs: tests
