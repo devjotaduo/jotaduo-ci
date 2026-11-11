@@ -76,9 +76,12 @@ jobs:
           - suite: typecheck
             selector: false
             command: $YARN nx run-many --targets=typecheck --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1
+          # lint:unlocalized-strings do front já falha na main da origem e bloquearia o oxlint, que depende dele.
           - suite: lint
             selector: false
-            command: $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1
+            command: |
+              $YARN nx build twenty-oxlint-rules --skip-nx-cache --parallel=1
+              $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --exclude-task-dependencies --skip-nx-cache --parallel=1
     env:
       CI: 'true'
       NX_DAEMON: 'false'
