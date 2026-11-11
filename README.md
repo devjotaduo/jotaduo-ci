@@ -11,4 +11,6 @@ O workflow `Tests` roda de duas formas:
 gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f ref=<branch>
 ```
 
+As suítes `typecheck` e `lint` (`nx run-many` em `twenty-server` e `twenty-front`) ficam fora do seletor e sempre olham os pacotes inteiros: os workflows `CI Server` e `CI Front` do repositório de origem não têm runner hospedado.
+
 O código é lido com uma chave de leitura guardada no secret `SOURCE_DEPLOY_KEY`. Os logs das execuções são públicos.
