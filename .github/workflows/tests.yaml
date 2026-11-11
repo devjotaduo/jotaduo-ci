@@ -72,6 +72,13 @@ jobs:
             command: |
               $YARN nx run-many --projects=twenty-ui --targets=check:ownership,test:exports --skip-nx-cache --parallel=1
               $YARN workspace twenty-ui vitest run --project unit --maxWorkers=4
+          # Fora do seletor: typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
+          - suite: typecheck
+            selector: false
+            command: $YARN nx run-many --targets=typecheck --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1
+          - suite: lint
+            selector: false
+            command: $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1
     env:
       CI: 'true'
       NX_DAEMON: 'false'
@@ -94,9 +101,10 @@ jobs:
         id: plan
         env:
           SUITE: ${{ matrix.suite }}
+          USE_SELECTOR: ${{ matrix.selector != false }}
         run: |
-          # Uma linha sem o seletor roda a suíte inteira pelo comando da matriz.
-          if [ -f "$SELECTOR" ]; then
+          # Uma linha sem o seletor, ou uma suíte com selector: false, roda a suíte inteira pelo comando da matriz.
+          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" = true ]; then
             scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE")
           else
             scope=legacy
