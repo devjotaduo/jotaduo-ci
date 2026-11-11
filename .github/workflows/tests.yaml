@@ -104,10 +104,11 @@ jobs:
         id: plan
         env:
           SUITE: ${{ matrix.suite }}
-          USE_SELECTOR: ${{ matrix.selector != false }}
+          # Chave ausente chega vazia; só selector: false desliga o seletor.
+          USE_SELECTOR: ${{ matrix.selector }}
         run: |
           # Uma linha sem o seletor, ou uma suíte com selector: false, roda a suíte inteira pelo comando da matriz.
-          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" = true ]; then
+          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" != false ]; then
             scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE")
           else
             scope=legacy
