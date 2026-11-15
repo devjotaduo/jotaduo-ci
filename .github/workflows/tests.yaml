@@ -78,7 +78,7 @@ jobs:
             command: |
               $YARN nx run-many --target=build --projects=twenty-sdk,twenty-cli --skip-nx-cache --parallel=1
               $YARN nx lint twenty-cli --skip-nx-cache
-              $YARN tsgo -p packages/twenty-cli/tsconfig.json --noEmit
+              $YARN nx typecheck twenty-cli --skip-nx-cache
               $YARN workspace twenty vitest run --maxWorkers=2 --exclude src/app/manifest/__tests__/manifest-fixtures.spec.ts
               $YARN workspace twenty vitest run --maxWorkers=1 src/app/manifest/__tests__/manifest-fixtures.spec.ts
           # Fora do seletor: typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
