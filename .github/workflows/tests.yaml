@@ -72,6 +72,15 @@ jobs:
             command: |
               $YARN nx run-many --projects=twenty-ui --targets=check:ownership,test:exports --skip-nx-cache --parallel=1
               $YARN workspace twenty-ui vitest run --project unit --maxWorkers=4
+          # Mesmos passos do ci-cli.yaml do upstream, sem o registro local e o app de ponta a ponta.
+          # O pacote twenty-cli se chama "twenty".
+          - suite: cli
+            command: |
+              $YARN nx run-many --target=build --projects=twenty-sdk,twenty-cli --skip-nx-cache --parallel=1
+              $YARN nx lint twenty-cli --skip-nx-cache
+              $YARN nx typecheck twenty-cli --skip-nx-cache
+              $YARN workspace twenty vitest run --maxWorkers=2 --exclude src/app/manifest/__tests__/manifest-fixtures.spec.ts
+              $YARN workspace twenty vitest run --maxWorkers=1 src/app/manifest/__tests__/manifest-fixtures.spec.ts
           # Fora do seletor: typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
           - suite: typecheck
             selector: false
@@ -107,8 +116,9 @@ jobs:
           # Chave ausente chega vazia; só selector: false desliga o seletor.
           USE_SELECTOR: ${{ matrix.selector }}
         run: |
-          # Uma linha sem o seletor, ou uma suíte com selector: false, roda a suíte inteira pelo comando da matriz.
-          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" != false ]; then
+          # Uma linha sem o seletor, um seletor que ainda não conhece a suíte (como cli antes do
+          # local-ci v25) ou uma suíte com selector: false roda a suíte inteira pelo comando da matriz.
+          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" != false ] && grep -qE "^[[:space:]]+$SUITE\)" "$SELECTOR"; then
             scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE")
           else
             scope=legacy
