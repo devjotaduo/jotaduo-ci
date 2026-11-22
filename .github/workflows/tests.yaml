@@ -54,6 +54,9 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      # Duas instalações do monorepo cabem no volume atual com margem; três
+      # chegaram a esgotar o disco do host durante o link do Yarn.
+      max-parallel: 2
       matrix:
         include:
           - suite: overlays
@@ -143,6 +146,11 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
         run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
+      - name: Release workspace disk
+        if: always()
+        # O checkout é efêmero. Mantém o repositório, mas remove dependências,
+        # caches e artefatos ignorados antes de liberar o runner para outra suíte.
+        run: git clean -ffdx
 
   cleanup:
     needs: tests
