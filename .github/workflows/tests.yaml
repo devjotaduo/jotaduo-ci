@@ -50,7 +50,7 @@ jobs:
   tests:
     name: ${{ matrix.suite }}
     needs: plan
-    runs-on: [self-hosted, linux, x64, jotaduo-ci]
+    runs-on: [self-hosted, linux, x64, "${{ matrix.runner_label || 'jotaduo-ci' }}"]
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -86,14 +86,16 @@ jobs:
               $YARN workspace twenty vitest run --maxWorkers=1 src/app/manifest/__tests__/manifest-fixtures.spec.ts
           # Fora do seletor: typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
           - suite: typecheck
+            runner_label: jotaduo-ci-heavy
             selector: false
-            command: $YARN nx run-many --targets=typecheck --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1
+            command: GOMEMLIMIT=8GiB GOMAXPROCS=1 $YARN nx run-many --targets=typecheck --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1 --args=--singleThreaded
           # lint:unlocalized-strings do front já falha na main da origem e bloquearia o oxlint, que depende dele.
           - suite: lint
+            runner_label: jotaduo-ci-heavy
             selector: false
             command: |
               $YARN nx build twenty-oxlint-rules --skip-nx-cache --parallel=1
-              $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --exclude-task-dependencies --skip-nx-cache --parallel=1
+              GOMEMLIMIT=8GiB GOMAXPROCS=1 $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --exclude-task-dependencies --skip-nx-cache --parallel=1
     env:
       CI: 'true'
       NX_DAEMON: 'false'
@@ -133,6 +135,8 @@ jobs:
         run: |
           package_temp=$(mktemp -d "${RUNNER_TEMP:?}/yarn-tmp.XXXXXXXX")
           echo "path=$package_temp" >> "$GITHUB_OUTPUT"
+          # Nx resolve NX_PROFILE a partir da raiz do checkout.
+          echo "nx_profile=$(realpath --relative-to="$PWD" "$package_temp/nx-profile.json")" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$package_temp" >> "$GITHUB_ENV"
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -147,7 +151,21 @@ jobs:
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
       - name: Run ${{ matrix.suite }}
         if: steps.plan.outputs.scope == 'legacy'
+        env:
+          NX_PROFILE: ${{ matrix.runner_label == 'jotaduo-ci-heavy' && steps.package_temp.outputs.nx_profile || '' }}
         run: ${{ matrix.command }}
+      - name: Verify both ${{ matrix.suite }} targets completed
+        if: matrix.runner_label == 'jotaduo-ci-heavy'
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          # Nx pode retornar zero quando o sistema interrompe uma tarefa filha.
+          jq -e --arg suite "$SUITE" '
+            map(select(.ph == "X")) |
+            all(.args.status == "success") and
+            any(.name == ("twenty-front:" + $suite)) and
+            any(.name == ("twenty-server:" + $suite))
+          ' "$TMPDIR/nx-profile.json"
       - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
         if: steps.plan.outputs.scope != 'legacy'
         env:
