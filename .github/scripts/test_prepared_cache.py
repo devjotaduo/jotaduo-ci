@@ -1,4 +1,6 @@
 """Exercise the private cache against an isolated Git checkout using real tar/zstd."""
+from contextlib import ExitStack
+import hashlib
 import importlib.util
 import json
 import os
@@ -20,6 +22,8 @@ class PreparedCacheTest(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         root = Path(scratch.name)
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
         original = Path.cwd()
         self.addCleanup(os.chdir, original)
         workspace = root / "checkout"
@@ -28,9 +32,9 @@ class PreparedCacheTest(unittest.TestCase):
         self.output = root / "output"
         env = {k: "fixture" for k in ("GITHUB_REPOSITORY_ID", "GITHUB_WORKFLOW_SHA",
                "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_NAME", "CACHE_NONCE")}
-        self.enterContext(patch.dict(os.environ, {**env, "TMPDIR": str(root), "GITHUB_OUTPUT": str(self.output)}))
+        contexts.enter_context(patch.dict(os.environ, {**env, "TMPDIR": str(root), "GITHUB_OUTPUT": str(self.output)}))
         slot = root / "cache"
-        self.enterContext(patch.multiple(cache, ROOT=slot, ARCHIVE=slot/"prepared.tar.zst",
+        contexts.enter_context(patch.multiple(cache, ROOT=slot, ARCHIVE=slot/"prepared.tar.zst",
                           META=slot/"prepared.json", SLOT=slot/"slot", PART=slot/"creating.tar.zst", BYPASS=slot/"bypass",
                           CAP=2**20, RESERVE=2**20))
         self.git("init", "-q")
@@ -73,6 +77,14 @@ class PreparedCacheTest(unittest.TestCase):
     def clean(self):
         self.git("reset", "--hard", "-q", "HEAD")
         self.git("clean", "-ffdxq")
+
+    def test_archive_digest_handles_empty_and_multiple_blocks(self):
+        archive = Path("hash-fixture")
+        for size in (0, cache.MIB * 2 + 37):
+            with self.subTest(size=size):
+                data = b"x" * size
+                archive.write_bytes(data)
+                self.assertEqual(cache.digest(archive), hashlib.sha256(data).hexdigest())
 
     def test_reuse_and_rotation(self):
         self.prepared()

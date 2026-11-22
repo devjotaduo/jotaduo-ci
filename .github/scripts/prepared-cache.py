@@ -100,8 +100,11 @@ def inputs(directory):
 
 
 def digest(path):
+    checksum = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(MIB), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
 def run_with_disk_reserve(command, lock, *, output=None, max_file=False):
