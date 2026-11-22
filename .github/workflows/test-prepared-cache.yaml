@@ -1,0 +1,26 @@
+name: Preparation cache tests
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/prepared-cache.py
+      - .github/scripts/test_prepared_cache.py
+      - .github/workflows/tests.yaml
+      - .github/workflows/test-prepared-cache.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise the cache with synthetic files
+        run: python3 -B .github/scripts/test_prepared_cache.py
