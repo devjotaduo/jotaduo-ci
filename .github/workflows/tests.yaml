@@ -27,6 +27,7 @@ jobs:
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
       base: ${{ steps.ref.outputs.base }}
+      cache_nonce: ${{ steps.ref.outputs.cache_nonce }}
     steps:
       - name: Resolve source ref
         id: ref
@@ -37,11 +38,18 @@ jobs:
         run: |
           # Um push em run/pr-<número>-<commit>-<execução>-<tentativa> pede o teste do merge desse pull request.
           # Com run/affected-pr-..., só os testes que o diff do pull request alcança.
+          echo "cache_nonce=$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = push ]; then
-            [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]] || { echo "Branch de disparo inválida."; exit 1; }
-            echo "ref=refs/pull/${BASH_REMATCH[2]}/merge" >> "$GITHUB_OUTPUT"
-            # O primeiro pai do commit de merge é a base do pull request.
-            if [ -n "${BASH_REMATCH[1]}" ]; then echo 'base=HEAD^1'; else echo 'base=full'; fi >> "$GITHUB_OUTPUT"
+            if [[ "$TRIGGER_BRANCH" =~ ^run/affected-merge-pr-[0-9]+-([0-9a-f]{40})-[0-9]+-[0-9]+$ ]]; then
+              echo "ref=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+              echo 'base=HEAD^1' >> "$GITHUB_OUTPUT"
+            elif [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]]; then
+              echo "ref=refs/pull/${BASH_REMATCH[2]}/merge" >> "$GITHUB_OUTPUT"
+              if [ -n "${BASH_REMATCH[1]}" ]; then echo 'base=HEAD^1'; else echo 'base=full'; fi >> "$GITHUB_OUTPUT"
+            else
+              echo 'Branch de disparo inválida.' >&2
+              exit 1
+            fi
           else
             echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
             echo 'base=full' >> "$GITHUB_OUTPUT"
@@ -106,6 +114,18 @@ jobs:
       TEST_BASE: ${{ needs.plan.outputs.base }}
       SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
+      - name: Prepare cache helper from the public workflow revision
+        id: cache_tool
+        run: |
+          control=$(mktemp -d "${RUNNER_TEMP:?}/ci-preparation.XXXXXXXX")
+          echo "path=$control" >> "$GITHUB_OUTPUT"
+          if curl --proto '=https' --fail --silent --show-error --retry 2 --max-time 20 \
+              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_WORKFLOW_SHA/.github/scripts/prepared-cache.py" \
+              -o "$control/cache"; then
+            chmod 700 "$control/cache"
+          else
+            echo 'Cache helper unavailable. Using fresh preparation.'
+          fi
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -114,6 +134,21 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Rotate this runner's private cache
+        id: cache_start
+        env:
+          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
+          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
+        run: |
+          if [ -x "$CACHE_TOOL/cache" ] && "$CACHE_TOOL/cache" begin; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            # A cold fallback must discard the previous generation before executing source scripts.
+            slot="/tmp/jotaduo-ci-prepared-$(id -u)"
+            if [ -d "$slot" ] && [ ! -L "$slot" ] && [ -O "$slot" ]; then
+              flock --exclusive "$slot" rm -f -- "$slot"/{prepared.tar.zst,prepared.json,creating.tar.zst,bypass,slot}
+            fi
+          fi
       - name: Plan ${{ matrix.suite }}
         id: plan
         env:
@@ -143,12 +178,41 @@ jobs:
         with:
           package-manager-cache: false
           node-version-file: .nvmrc
+      - name: Restore prepared dependencies and shared build
+        id: restore
+        if: steps.cache_start.outputs.ready == 'true' && matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
+        env:
+          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
+          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
+        run: |
+          if ! "$CACHE_TOOL/cache" restore; then
+            # A killed helper can leave a partial tree. A failed rollback must fail the job.
+            git reset --hard --quiet HEAD
+            git clean -ffdxq
+            echo 'hit=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Install dependencies
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
         run: $YARN install --immutable --check-cache
       - name: Build shared dependencies
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
+        env:
+          NX_PROFILE: ${{ steps.package_temp.outputs.nx_profile }}
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+      - name: Save successful preparation
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
+        env:
+          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
+          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
+        run: |
+          profile="$TMPDIR/nx-profile.json"
+          if [ -s "$profile" ] && jq -e 'any(.[]; .ph == "X" and .args.status != "success")' "$profile" >/dev/null; then
+            echo 'Nx reported an incomplete shared build.' >&2
+            exit 1
+          fi
+          if [ "${{ steps.cache_start.outputs.ready }}" = true ] && [ -s "$profile" ] && jq -e 'any(.[]; .name == "twenty-shared:build" and .args.status == "success")' "$profile" >/dev/null; then
+            "$CACHE_TOOL/cache" save || echo 'Preparation cache unavailable. Continuing with the fresh build.'
+          fi
       - name: Run ${{ matrix.suite }}
         if: steps.plan.outputs.scope == 'legacy'
         env:
@@ -179,6 +243,11 @@ jobs:
           if [ -d "$PACKAGE_TEMP" ]; then
             find "$PACKAGE_TEMP" -xdev -depth -delete
           fi
+      - name: Release cache helper
+        if: always() && steps.cache_tool.outputs.path != ''
+        env:
+          CONTROL: ${{ steps.cache_tool.outputs.path }}
+        run: rm -f -- "$CONTROL/cache" && rmdir -- "$CONTROL"
       - name: Release workspace disk
         if: always()
         # O checkout é efêmero. Mantém o repositório, mas remove dependências,
