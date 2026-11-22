@@ -101,8 +101,6 @@ jobs:
       NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
-      # Mantém os arquivos ZipFS do Yarn dentro do temporário isolado do job.
-      TMPDIR: ${{ runner.temp }}/yarn-tmp
       TEST_BASE: ${{ needs.plan.outputs.base }}
       SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
@@ -130,8 +128,12 @@ jobs:
           fi
           echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
       - name: Prepare package temporary directory
+        id: package_temp
         if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
-        run: mkdir -p "$TMPDIR"
+        run: |
+          package_temp=$(mktemp -d "${RUNNER_TEMP:?}/yarn-tmp.XXXXXXXX")
+          echo "path=$package_temp" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$package_temp" >> "$GITHUB_ENV"
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -151,16 +153,19 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
         run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
+      - name: Release package temporary directory
+        if: always() && steps.package_temp.outputs.path != ''
+        env:
+          PACKAGE_TEMP: ${{ steps.package_temp.outputs.path }}
+        run: |
+          if [ -d "$PACKAGE_TEMP" ]; then
+            find "$PACKAGE_TEMP" -xdev -depth -delete
+          fi
       - name: Release workspace disk
         if: always()
         # O checkout é efêmero. Mantém o repositório, mas remove dependências,
         # caches e artefatos ignorados antes de liberar o runner para outra suíte.
-        run: |
-          git clean -ffdx
-          if [ -d "$TMPDIR" ]; then
-            find "$TMPDIR" -mindepth 1 -delete
-            rmdir "$TMPDIR"
-          fi
+        run: git clean -ffdx
 
   cleanup:
     needs: tests
