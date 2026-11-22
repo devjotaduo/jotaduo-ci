@@ -101,6 +101,8 @@ jobs:
       NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      # Mantém os arquivos ZipFS do Yarn dentro do temporário isolado do job.
+      TMPDIR: ${{ runner.temp }}/yarn-tmp
       TEST_BASE: ${{ needs.plan.outputs.base }}
       SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
@@ -127,6 +129,9 @@ jobs:
             scope=legacy
           fi
           echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
+      - name: Prepare package temporary directory
+        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
+        run: mkdir -p "$TMPDIR"
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -150,7 +155,12 @@ jobs:
         if: always()
         # O checkout é efêmero. Mantém o repositório, mas remove dependências,
         # caches e artefatos ignorados antes de liberar o runner para outra suíte.
-        run: git clean -ffdx
+        run: |
+          git clean -ffdx
+          if [ -d "$TMPDIR" ]; then
+            find "$TMPDIR" -mindepth 1 -delete
+            rmdir "$TMPDIR"
+          fi
 
   cleanup:
     needs: tests
