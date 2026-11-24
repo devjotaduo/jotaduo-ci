@@ -1,4 +1,4 @@
-# Testes do fork devjotaduo/jotaduo-v0.01 em runners do GitHub. Este repositório guarda só o workflow: o código
+# Testes do fork jotaduo2-eng/jotaduo-v0.01 em runners do GitHub. Este repositório guarda só o workflow: o código
 # vem do repositório privado com um token curto do GitHub App e o resultado volta ao commit do pull request como o
 # check run "ci-publico". A chave do App só existe em "start", "fetch" e "report", que não executam o código baixado;
 # os jobs de teste recebem os arquivos por artefato (público por um dia) e não referenciam segredo nenhum.
@@ -26,7 +26,7 @@ concurrency:
 run-name: Tests ${{ inputs.trigger || inputs.sha }}
 
 env:
-  SOURCE_OWNER: devjotaduo
+  SOURCE_OWNER: jotaduo2-eng
   SOURCE_REPO: jotaduo-v0.01
   APP_ID: 5895369
   CHECK_TITLE: shared, frontend, server, ui, cli, typecheck e lint
