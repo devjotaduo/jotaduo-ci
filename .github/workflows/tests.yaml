@@ -151,14 +151,21 @@ jobs:
         id: changes
         if: needs.start.outputs.mode == 'affected'
         working-directory: src
+        shell: bash
         run: |
-          changes=$(git -c core.quotePath=false diff --no-renames --name-status HEAD^1 HEAD | awk -F'\t' '
+          # Sem o pai, ou com o git falhando, roda tudo: uma lista vazia passaria como "nada mudou".
+          if ! git rev-parse -q --verify 'HEAD^1' > /dev/null; then echo 'affected=false' >> "$GITHUB_OUTPUT"; exit 0; fi
+          diff=$(git -c core.quotePath=false diff --no-renames --name-status HEAD^1 HEAD)
+          # O ci-local-tests.yaml fica fora do artefato, mas o seletor roda tudo quando ele muda; o nome já é público.
+          changes=$(awk -F'\t' '
+            $2 == ".github/workflows/ci-local-tests.yaml" ||
             $2 !~ /^(\.agent-flow|\.agent-kit|\.agents|\.claude|\.codex|\.concord|\.github|\.vscode|deploy|docs)\// &&
             $2 != ".mcp.json" &&
-            ($2 !~ /^packages\/twenty-website\// || $2 == "packages/twenty-website/package.json")')
+            ($2 !~ /^packages\/twenty-website\// || $2 == "packages/twenty-website/package.json")' <<< "$diff")
           count=$(grep -c . <<< "$changes" || true)
           echo "$count arquivo(s) alterado(s) no artefato."
-          if [ "$count" -gt 3000 ]; then echo 'affected=false' >> "$GITHUB_OUTPUT"; exit 0; fi
+          # A lista vai a uma variável de ambiente nos jobs de teste, que o Linux limita a 128 KB.
+          if [ "${#changes}" -gt 100000 ]; then echo 'affected=false' >> "$GITHUB_OUTPUT"; exit 0; fi
           { echo 'affected=true'; echo 'changes<<CHANGES_EOF'; echo "$changes"; echo 'CHANGES_EOF'; } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -191,7 +198,7 @@ jobs:
       - name: Cache key
         id: key
         run: |
-          lock='deps-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-'
+          lock='deps-${{ runner.os }}-${{ hashFiles('.nvmrc', 'yarn.lock') }}-'
           { echo "lock=$lock"; echo "key=${lock}${{ hashFiles('packages/twenty-shared/**') }}"; } | tee -a "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: exact
@@ -200,7 +207,9 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-            packages/twenty-shared
+            packages/twenty-shared/dist
+            packages/twenty-shared/*/dist
+            packages/twenty-shared/*/package.json
             .yarn/install-state.gz
           lookup-only: true
       # A instalação do monorepo não cabe no disco livre padrão do runner.
@@ -231,7 +240,9 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-            packages/twenty-shared
+            packages/twenty-shared/dist
+            packages/twenty-shared/*/dist
+            packages/twenty-shared/*/package.json
             .yarn/install-state.gz
       # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -242,9 +253,12 @@ jobs:
       - name: Install dependencies
         if: steps.exact.outputs.cache-hit != 'true'
         run: $YARN install --immutable
+      # O cache parcial traz o build do twenty-shared de outro commit: volta o pacote ao do artefato antes de compilar.
       - name: Build shared dependencies
         if: steps.exact.outputs.cache-hit != 'true'
-        run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+        run: |
+          git checkout -q -- packages/twenty-shared && git clean -fdxq -e node_modules packages/twenty-shared
+          $YARN nx build twenty-shared --skip-nx-cache --parallel=1
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.exact.outputs.cache-hit != 'true'
         with:
@@ -252,7 +266,9 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-            packages/twenty-shared
+            packages/twenty-shared/dist
+            packages/twenty-shared/*/dist
+            packages/twenty-shared/*/package.json
             .yarn/install-state.gz
 
   tests:
@@ -355,7 +371,9 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-            packages/twenty-shared
+            packages/twenty-shared/dist
+            packages/twenty-shared/*/dist
+            packages/twenty-shared/*/package.json
             .yarn/install-state.gz
       - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
         env:
