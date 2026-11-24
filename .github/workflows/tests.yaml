@@ -192,7 +192,7 @@ jobs:
         id: key
         run: |
           lock='deps-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-'
-          { echo "lock=$lock"; echo "key=$lock${{ hashFiles('packages/twenty-shared/**') }}"; } | tee -a "$GITHUB_OUTPUT"
+          { echo "lock=$lock"; echo "key=${lock}${{ hashFiles('packages/twenty-shared/**') }}"; } | tee -a "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: exact
         with:
