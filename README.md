@@ -14,7 +14,7 @@ gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f sha=<40 caracteres>
 ## Como o código chega e o resultado volta
 
 - `start` abre o check run `ci-publico` em andamento no commit do pull request.
-- `fetch` gera um token de curta duração do GitHub App `kit-agentes-ci` (id 5895369, só `contents: read`), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes, `twenty-docs` e `twenty-website` (destes dois só o `package.json`) e envia o resto como artefato. Ele não executa nada do que baixa.
+- `fetch` gera um token de curta duração do GitHub App `kit-agentes-ci` (id 5895369, só `contents: read`), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes e `twenty-website` (dele só o `package.json`; o `twenty-docs` entra porque um teste do servidor lê os guias de UI) e envia o resto como artefato. Ele não executa nada do que baixa.
 - Os jobs de teste (`shared`, `frontend`, `server`, `ui`, `cli`, `typecheck-*`, `lint-*`) recebem o artefato e não referenciam segredo nenhum. Rodam sempre as suítes inteiras pelo `packages/twenty-utils/ci/run-affected-tests.sh` da origem: sem o histórico Git não há diff para o seletor.
 - `report` conclui o `ci-publico` com success, failure ou cancelled. O `hosted-tests` do privado espera esse check.
 
