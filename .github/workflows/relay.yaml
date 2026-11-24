@@ -1,0 +1,27 @@
+# O repositório privado só consegue criar branches aqui (chave de deploy CI_TRIGGER_KEY). Este workflow troca o
+# push pelo disparo de Tests na main: o cache do Actions de uma branch efêmera não serve às execuções seguintes.
+name: Relay
+
+on:
+  push:
+    branches:
+      - 'run/**'
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Dispatch Tests and delete the trigger branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER: ${{ github.ref_name }}
+        run: |
+          [[ "$TRIGGER" =~ ^run/[a-z0-9-]+$ ]] || { echo 'Branch de disparo inválida.' >&2; exit 1; }
+          gh workflow run tests.yaml --repo "$GITHUB_REPOSITORY" --ref main -f trigger="$TRIGGER"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$TRIGGER"

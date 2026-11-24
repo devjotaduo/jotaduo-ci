@@ -5,25 +5,25 @@
 name: Tests
 
 on:
-  # run/pr-<n>-<sha>-<execução>-<tentativa> testa o merge do PR; run/affected-merge-pr-<n>-<sha>-... testa o próprio sha.
-  # Só a chave de deploy CI_TRIGGER_KEY do repositório privado cria essas branches.
-  push:
-    branches:
-      - 'run/**'
+  # O workflow Relay dispara este a partir da main, para as execuções dividirem o mesmo cache.
+  # trigger: run/pr-<n>-<sha>-<execução>-<tentativa> testa o merge do PR com as suítes inteiras;
+  # run/affected-merge-pr-<n>-<sha>-... testa o commit de merge informado, só no que o diff alcança.
   workflow_dispatch:
     inputs:
+      trigger:
+        description: Branch de disparo criada pelo repositório privado
+        type: string
       sha:
-        description: Commit do repositório privado (40 caracteres hexadecimais)
-        required: true
+        description: Commit do repositório privado (40 caracteres hexadecimais), para um teste manual
         type: string
 
 permissions: {}
 
 concurrency:
-  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
+  group: tests-${{ inputs.trigger || inputs.sha }}
   cancel-in-progress: true
 
-run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
+run-name: Tests ${{ inputs.trigger || inputs.sha }}
 
 env:
   SOURCE_OWNER: devjotaduo
@@ -39,28 +39,26 @@ jobs:
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
       sha: ${{ steps.ref.outputs.sha }}
+      base: ${{ steps.ref.outputs.base }}
       check: ${{ steps.check.outputs.id }}
     steps:
       - name: Resolve source ref
         id: ref
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          TRIGGER_BRANCH: ${{ github.ref_name }}
+          TRIGGER: ${{ inputs.trigger }}
           INPUT_SHA: ${{ inputs.sha }}
         run: |
-          if [ "$EVENT_NAME" = push ]; then
-            if [[ "$TRIGGER_BRANCH" =~ ^run/affected-merge-pr-[0-9]+-([0-9a-f]{40})-[0-9]+-[0-9]+$ ]]; then
-              sha=${BASH_REMATCH[1]}; ref=$sha
-            elif [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-([0-9a-f]{40})(-[0-9]+-[0-9]+)?$ ]]; then
-              sha=${BASH_REMATCH[3]}; ref=refs/pull/${BASH_REMATCH[2]}/merge
-            else
-              echo 'Branch de disparo inválida.' >&2; exit 1
-            fi
-          else
-            [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha inválido' >&2; exit 1; }
+          base=full
+          if [[ "$TRIGGER" =~ ^run/affected-merge-pr-[0-9]+-([0-9a-f]{40})-[0-9]+-[0-9]+$ ]]; then
+            sha=${BASH_REMATCH[1]}; ref=$sha; base='HEAD^1'
+          elif [[ "$TRIGGER" =~ ^run/(affected-)?pr-([0-9]+)-([0-9a-f]{40})(-[0-9]+-[0-9]+)?$ ]]; then
+            sha=${BASH_REMATCH[3]}; ref=refs/pull/${BASH_REMATCH[2]}/merge
+          elif [ -z "$TRIGGER" ] && [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             sha=$INPUT_SHA; ref=$INPUT_SHA
+          else
+            echo 'Informe um trigger run/... válido ou um sha de 40 caracteres.' >&2; exit 1
           fi
-          { echo "sha=$sha"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+          { echo "sha=$sha"; echo "ref=$ref"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app
         with:
@@ -127,6 +125,22 @@ jobs:
       # O upload segue links: um link no commit levaria arquivos do runner para o artefato público.
       - name: Refuse symbolic links
         run: '[ -z "$(find src -path src/.git -prune -o -type l -print)" ] || { echo "link simbólico no commit"; exit 1; }'
+      # Só nomes e estados, lidos da API: os jobs de teste refazem com eles o diff que o seletor consulta.
+      - name: List changed files
+        if: needs.start.outputs.base != 'full'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ needs.start.outputs.sha }}
+        run: |
+          test ! -e src/.ci-changes.json
+          parent=$(gh api "repos/$SOURCE_OWNER/$SOURCE_REPO/commits/$SHA" --jq '.parents[0].sha')
+          [[ "$parent" =~ ^[0-9a-f]{40}$ ]]
+          for page in 1 2 3; do
+            gh api "repos/$SOURCE_OWNER/$SOURCE_REPO/compare/$parent...$SHA?per_page=100&page=$page" \
+              --jq '[.files[]? | {filename, status, previous_filename}]'
+          done | jq -s 'add' > changes.json
+          # A API corta a lista em 300 arquivos: a partir daí as suítes rodam inteiras.
+          if [ "$(jq length changes.json)" -lt 300 ]; then mv changes.json src/.ci-changes.json; fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: source
@@ -137,9 +151,66 @@ jobs:
             src/
             !src/.git/
 
+  # Instala as dependências e compila o twenty-shared uma vez por combinação de lockfile e fontes do shared.
+  prepare:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      key: ${{ steps.key.outputs.value }}
+    env:
+      NX_DAEMON: 'false'
+      NX_NO_CLOUD: 'true'
+      YARN: node .yarn/releases/yarn-4.18.1.cjs
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: node
+        with:
+          package-manager-cache: false
+          node-version-file: .nvmrc
+      - name: Compute preparation key
+        id: key
+        run: echo "value=prepared-v1-${{ runner.os }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('yarn.lock', '.yarnrc.yml', '.yarn/releases/**', 'package.json', 'packages/*/package.json', 'packages/twenty-shared/**') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: prepared
+        with:
+          lookup-only: true
+          key: ${{ steps.key.outputs.value }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+      # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.prepared.outputs.cache-hit != 'true'
+        with:
+          path: ~/.yarn/berry/cache
+          key: yarn-${{ hashFiles('yarn.lock') }}
+      - name: Install dependencies
+        if: steps.prepared.outputs.cache-hit != 'true'
+        run: $YARN install --immutable
+      # O Nx espera estar dentro de um repositório Git.
+      - name: Build shared dependencies
+        if: steps.prepared.outputs.cache-hit != 'true'
+        run: |
+          git init -q -b main
+          $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+          rm -rf .git
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.prepared.outputs.cache-hit != 'true'
+        with:
+          key: ${{ steps.key.outputs.value }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+
   tests:
     name: ${{ matrix.suite }}
-    needs: fetch
+    needs: [start, fetch, prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -147,15 +218,11 @@ jobs:
       matrix:
         include:
           - suite: shared
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run shared full
           - suite: frontend
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run frontend full
           - suite: server
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run server full
           - suite: ui
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run ui full
           - suite: cli
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run cli full
+          # Typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
           - suite: typecheck-server
             command: $YARN nx typecheck twenty-server --skip-nx-cache
           - suite: typecheck-front
@@ -171,10 +238,11 @@ jobs:
       NX_NO_CLOUD: 'true'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
-      # A instalação do monorepo não cabe no disco livre padrão do runner.
+      # A instalação do monorepo não cabe no disco livre padrão; a limpeza segue em segundo plano.
       - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
+        run: sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost > /dev/null 2>&1 &
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: source
@@ -182,26 +250,108 @@ jobs:
         with:
           package-manager-cache: false
           node-version-file: .nvmrc
-      # Alguns testes e o Nx esperam estar dentro de um repositório Git.
+      # O artefato não traz histórico. Com a lista do diff, o repositório local ganha um commit base
+      # que difere do testado exatamente nesses caminhos: é o que o seletor consulta com git diff.
       - name: Create a local repository
+        id: repository
+        env:
+          RUN_ID: ${{ github.run_id }}
+          BASE: ${{ needs.start.outputs.base }}
         run: |
           git config --global user.name jotaduo-ci
           git config --global user.email jotaduo-ci@users.noreply.github.com
-          git init -q -b main && git add -A && git commit -q -m "ci ${{ github.run_id }}"
-      # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          git init -q -b main
+          if [ -f .ci-changes.json ]; then mv .ci-changes.json "$RUNNER_TEMP/changes.json"; fi
+          # Sem a lista (diff grande demais para a API) as suítes rodam inteiras.
+          if [ ! -f "$RUNNER_TEMP/changes.json" ]; then BASE=full; fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          python3 - "$RUNNER_TEMP/changes.json" <<'PY'
+          import json, os, subprocess, sys
+
+          def git(*arguments):
+              return subprocess.run(['git', *arguments], check=True, text=True, capture_output=True).stdout.strip()
+
+          def inside(path):
+              normalized = os.path.normpath(path)
+              if os.path.isabs(normalized) or normalized.split(os.sep)[0] in ('..', '.git'):
+                  sys.exit('caminho inválido na lista do diff')
+              return normalized
+
+          def stub(path, label):
+              os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+              with open(path, 'w') as file:
+                  file.write(label + ' ' + os.environ['RUN_ID'] + '\n')
+
+          def remove(path):
+              if os.path.lexists(path):
+                  os.remove(path)
+
+          changes = json.load(open(sys.argv[1])) if os.path.exists(sys.argv[1]) else None
+          if changes is None:
+              git('add', '-A')
+              git('commit', '-q', '-m', 'head')
+              sys.exit(0)
+
+          # Caminhos fora do artefato (docs, deploy, workflows) entram como marcadores.
+          for change in changes:
+              path = inside(change['filename'])
+              if change['status'] != 'removed' and not os.path.lexists(path):
+                  stub(path, 'head')
+          git('add', '-A', '-f')
+          head_tree = git('write-tree')
+
+          for change in changes:
+              path = inside(change['filename'])
+              status = change['status']
+              if status in ('added', 'copied'):
+                  remove(path)
+              elif status == 'renamed':
+                  remove(path)
+                  stub(inside(change['previous_filename']), 'base')
+              else:
+                  stub(path, 'base')
+          git('add', '-A', '-f')
+          base_commit = git('commit-tree', git('write-tree'), '-m', 'base')
+          head_commit = git('commit-tree', head_tree, '-p', base_commit, '-m', 'head')
+          git('reset', '-q', '--hard', head_commit)
+          PY
+      - name: Plan ${{ matrix.suite }}
+        id: plan
+        env:
+          SUITE: ${{ matrix.suite }}
+          COMMAND: ${{ matrix.command }}
+          TEST_BASE: ${{ steps.repository.outputs.base }}
+        run: |
+          scope=full
+          if [ -z "$COMMAND" ]; then scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE"); fi
+          echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: prepared
+        if: steps.plan.outputs.scope != 'none'
         with:
-          path: ~/.yarn/berry/cache
-          key: yarn-${{ hashFiles('yarn.lock') }}
+          key: ${{ needs.prepare.outputs.key }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
       - name: Install dependencies
+        if: steps.plan.outputs.scope != 'none' && steps.prepared.outputs.cache-hit != 'true'
         run: $YARN install --immutable
       - name: Build shared dependencies
+        if: steps.plan.outputs.scope != 'none' && steps.prepared.outputs.cache-hit != 'true'
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+      - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
+        if: matrix.command == ''
+        env:
+          SUITE: ${{ matrix.suite }}
+          TEST_BASE: ${{ steps.repository.outputs.base }}
+        run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
       - name: Run ${{ matrix.suite }}
+        if: matrix.command != ''
         run: ${{ matrix.command }}
 
   report:
-    needs: [start, fetch, tests]
+    needs: [start, fetch, prepare, tests]
     # Sempre roda, para o check aberto em "start" não ficar em andamento.
     if: ${{ always() && needs.start.outputs.sha != '' }}
     runs-on: ubuntu-latest
@@ -221,10 +371,10 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ needs.start.outputs.sha }}
           CHECK: ${{ needs.start.outputs.check }}
-          OK: ${{ needs.fetch.result == 'success' && needs.tests.result == 'success' }}
+          OK: ${{ needs.fetch.result == 'success' && needs.prepare.result == 'success' && needs.tests.result == 'success' }}
           CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SUMMARY: 'fetch: ${{ needs.fetch.result }}; testes: ${{ needs.tests.result }}'
+          SUMMARY: 'fetch: ${{ needs.fetch.result }}; preparo: ${{ needs.prepare.result }}; testes: ${{ needs.tests.result }}'
         run: |
           conclusion=failure
           [ "$CANCELLED" = true ] && conclusion=cancelled
@@ -238,17 +388,3 @@ jobs:
             sleep 10
           done
           echo "ci-publico: $conclusion em $SHA"
-
-  cleanup:
-    needs: report
-    if: always() && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Delete trigger branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TRIGGER_BRANCH: ${{ github.ref_name }}
-        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$TRIGGER_BRANCH"
