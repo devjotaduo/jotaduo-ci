@@ -1,30 +1,23 @@
 # jotaduo-ci
 
-Executa os testes de um repositório privado em runners dedicados auto-hospedados.
+Espelho sem código, só para rodar os testes do repositório privado `devjotaduo/jotaduo-v0.01` em runners do GitHub, que são livres em repositório público. Segue o modelo do `devjotaduo/kit-agentes-universal-ci`.
 
-O workflow `Tests` roda de duas formas:
+O workflow `Tests` roda:
 
-- por um push em `run/pr-<número>-<commit>-<execução>-<tentativa>`, feito pelo CI do repositório de origem com uma chave de deploy; testa o merge desse pull request e apaga a branch ao terminar. Com `run/affected-pr-...`, cada suíte roda só os testes que o diff do pull request alcança, pelo seletor `packages/twenty-utils/ci/run-affected-tests.sh` do repositório de origem; uma linha sem o seletor roda as suítes inteiras;
-- manualmente, com a branch, tag ou commit a testar:
+- por um push em `run/pr-<número>-<commit>-<execução>-<tentativa>`, feito pelo job `hosted-tests` do repositório privado com a chave de deploy `CI_TRIGGER_KEY`; testa o merge do pull request e apaga a branch ao terminar. `run/affected-merge-pr-<número>-<sha>-...` testa o próprio commit informado;
+- manualmente, com o commit a testar:
 
 ```bash
-gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f ref=<branch>
+gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f sha=<40 caracteres>
 ```
 
-A suíte `cli` repete os passos do `ci-cli.yaml` do upstream para o `twenty-cli`: build do SDK e da CLI, lint, typecheck (`nx typecheck twenty-cli`: o `tsgo` só existe nos binários da raiz, que o `yarn` não enxerga) e Vitest, sem o registro local e o app de ponta a ponta. Ela usa o seletor só quando o `run-affected-tests.sh` da origem conhece a suíte (`local-ci` v25 em diante); antes disso, roda inteira.
+## Como o código chega e o resultado volta
 
-As suítes `typecheck` e `lint` (`nx run-many` em `twenty-server` e `twenty-front`) ficam fora do seletor e sempre olham os pacotes inteiros: os workflows `CI Server` e `CI Front` do repositório de origem não têm runner hospedado. O `lint` roda o oxlint sem as dependências de tarefa: a checagem `twenty-front:lint:unlocalized-strings` acusa 33 strings sem marcação de tradução que já estão na `main` da origem (11/11/2026) e, como dependência, impediria o oxlint de rodar.
+- `start` abre o check run `ci-publico` em andamento no commit do pull request.
+- `fetch` gera um token de curta duração do GitHub App `kit-agentes-ci` (id 5895369, só `contents: read`), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes, `twenty-docs` e `twenty-website` (destes dois só o `package.json`) e envia o resto como artefato. Ele não executa nada do que baixa.
+- Os jobs de teste (`shared`, `frontend`, `server`, `ui`, `cli`, `typecheck-*`, `lint-*`) recebem o artefato e não referenciam segredo nenhum. Rodam sempre as suítes inteiras pelo `packages/twenty-utils/ci/run-affected-tests.sh` da origem: sem o histórico Git não há diff para o seletor.
+- `report` conclui o `ci-publico` com success, failure ou cancelled. O `hosted-tests` do privado espera esse check.
 
-O código é lido com uma chave de leitura guardada no secret `SOURCE_DEPLOY_KEY`. Os logs das execuções são públicos: uma falha de typecheck ou de lint imprime trechos do código do repositório de origem.
+A chave do App fica no secret `CI_APP_PRIVATE_KEY` do environment `ci`, usado só por `start`, `fetch` e `report`.
 
-O disparo `run/affected-merge-pr-<número>-<SHA do merge>-<execução>-<tentativa>` fixa o checkout das suítes no commit de merge informado e usa o primeiro pai como base. Se esse commit ficar indisponível, o checkout falha. Os prefixos anteriores continuam resolvendo a referência de merge do PR como antes.
-
-## Cache privado da preparação
-
-As suítes no mesmo runner podem reutilizar a instalação do Yarn e o build de `twenty-shared` realizados por outra suíte da mesma tentativa. A primeira suíte executa `yarn install --immutable --check-cache` e o build completo. O workflow só grava o resultado quando o perfil do Nx confirma que o build terminou com sucesso. Cada suíte executa seus próprios testes e análises.
-
-A chave inclui o SHA efetivamente conferido da origem, o workflow, a execução e tentativa, um identificador aleatório do plano, o runner, o caminho do checkout, a arquitetura e a versão do Node. A troca de revisão ou execução invalida o arquivo antes de executar scripts da origem. A cópia local inclui `node_modules` da raiz e dos workspaces, estado de instalação do Yarn e os arquivos gerados ou alterados em `twenty-shared`, inclusive índices, manifests e declarações. Um layout de preparação desconhecido segue pelo caminho completo. Os tempos de instalação e compilação aparecem nos respectivos passos do Actions. O passo de restauração registra o tempo total do acerto ou da falta.
-
-O arquivo fica em um diretório de modo 0700 em `/tmp`, separado por usuário de serviço. O workflow confere o SHA-256 antes de restaurá-lo. A cota é de 1,5 GiB por runner e a reserva de espaço é de 12 GiB durante a compactação e a extração. Um bloqueio serializa as mudanças e a publicação do arquivo é atômica. Uma tentativa nova limpa a cópia anterior. O prazo de reuso é de seis horas; a próxima operação remove o arquivo vencido. Sem novos jobs, a política local do host limpa arquivos inativos de `/tmp` após 30 dias, na varredura agendada.
-
-O cache permanece no disco do executor. Os jobs com acesso ao mesmo usuário do sistema pertencem à mesma fronteira de confiança e conseguem ler os arquivos desse usuário. Use um usuário dedicado por runner e execute nele apenas workloads de confiança equivalente. Para separar workloads mutuamente não confiáveis é necessário isolamento do executor.
+O artefato e os logs são públicos: o artefato com o código de `packages/` fica baixável por um dia, e uma falha de typecheck ou lint imprime trechos do código. A suíte `overlays` precisa do histórico Git e roda no repositório privado.
