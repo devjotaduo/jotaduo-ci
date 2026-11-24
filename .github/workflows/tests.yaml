@@ -1,7 +1,7 @@
 # Testes do fork devjotaduo/jotaduo-v0.01 em runners do GitHub. Este repositório guarda só o workflow: o código
 # vem do repositório privado com um token curto do GitHub App e o resultado volta ao commit do pull request como o
 # check run "ci-publico". A chave do App só existe em "start", "fetch" e "report", que não executam o código baixado;
-# os jobs de teste recebem os arquivos por artefato (público por um dia) e não referenciam segredo nenhum.
+# "prepare" e os jobs de teste recebem os arquivos por artefato (público por um dia) e não referenciam segredo nenhum.
 name: Tests
 
 on:
@@ -16,14 +16,18 @@ on:
         description: Commit do repositório privado (40 caracteres hexadecimais)
         required: true
         type: string
+  # Cada execução roda numa branch run/** nova, e o cache do GitHub só passa de uma branch para outra quando foi
+  # salvo na main. O agendamento prepara a main do privado aqui para as execuções seguintes acharem as dependências.
+  schedule:
+    - cron: '23 */6 * * *'
 
 permissions: {}
 
 concurrency:
-  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
+  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.sha || github.event_name }}
   cancel-in-progress: true
 
-run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
+run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.sha || 'preparo da main' }}
 
 env:
   SOURCE_OWNER: devjotaduo
@@ -39,6 +43,7 @@ jobs:
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
       sha: ${{ steps.ref.outputs.sha }}
+      mode: ${{ steps.ref.outputs.mode }}
       check: ${{ steps.check.outputs.id }}
     steps:
       - name: Resolve source ref
@@ -48,11 +53,17 @@ jobs:
           TRIGGER_BRANCH: ${{ github.ref_name }}
           INPUT_SHA: ${{ inputs.sha }}
         run: |
-          if [ "$EVENT_NAME" = push ]; then
+          # mode=affected só quando o privado pediu (run/affected-...): ele já manda a suíte inteira para a main e
+          # para o que a política dele julga arriscado. O seletor ainda roda tudo se mudar configuração ou dependência.
+          mode=full
+          if [ "$EVENT_NAME" = schedule ]; then
+            sha=''; ref=main
+          elif [ "$EVENT_NAME" = push ]; then
             if [[ "$TRIGGER_BRANCH" =~ ^run/affected-merge-pr-[0-9]+-([0-9a-f]{40})-[0-9]+-[0-9]+$ ]]; then
-              sha=${BASH_REMATCH[1]}; ref=$sha
+              sha=${BASH_REMATCH[1]}; ref=$sha; mode=affected
             elif [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-([0-9a-f]{40})(-[0-9]+-[0-9]+)?$ ]]; then
               sha=${BASH_REMATCH[3]}; ref=refs/pull/${BASH_REMATCH[2]}/merge
+              [ -n "${BASH_REMATCH[1]}" ] && mode=affected
             else
               echo 'Branch de disparo inválida.' >&2; exit 1
             fi
@@ -60,8 +71,9 @@ jobs:
             [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha inválido' >&2; exit 1; }
             sha=$INPUT_SHA; ref=$INPUT_SHA
           fi
-          { echo "sha=$sha"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+          { echo "sha=$sha"; echo "ref=$ref"; echo "mode=$mode"; } | tee -a "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        if: steps.ref.outputs.sha != ''
         id: app
         with:
           app-id: ${{ env.APP_ID }}
@@ -70,6 +82,7 @@ jobs:
           repositories: ${{ env.SOURCE_REPO }}
           permission-checks: write
       - name: Open check run
+        if: steps.ref.outputs.sha != ''
         id: check
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -88,6 +101,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ci
+    outputs:
+      affected: ${{ steps.changes.outputs.affected }}
+      changes: ${{ steps.changes.outputs.changes }}
     steps:
       - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app
@@ -105,6 +121,8 @@ jobs:
           token: ${{ steps.app.outputs.token }}
           persist-credentials: false
           path: src
+          # No modo affected o primeiro pai do commit testado é a base do pull request.
+          fetch-depth: ${{ needs.start.outputs.mode == 'affected' && 2 || 1 }}
           filter: blob:none
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -127,6 +145,21 @@ jobs:
       # O upload segue links: um link no commit levaria arquivos do runner para o artefato público.
       - name: Refuse symbolic links
         run: '[ -z "$(find src -path src/.git -prune -o -type l -print)" ] || { echo "link simbólico no commit"; exit 1; }'
+      # O artefato vai sem o .git; os jobs de teste recebem só a lista do que o pull request mudou, sem os caminhos
+      # que ficam fora do artefato. Uma lista grande demais para a saída do job roda as suítes inteiras.
+      - name: List changed files
+        id: changes
+        if: needs.start.outputs.mode == 'affected'
+        working-directory: src
+        run: |
+          changes=$(git -c core.quotePath=false diff --no-renames --name-status HEAD^1 HEAD | awk -F'\t' '
+            $2 !~ /^(\.agent-flow|\.agent-kit|\.agents|\.claude|\.codex|\.concord|\.github|\.vscode|deploy|docs)\// &&
+            $2 != ".mcp.json" &&
+            ($2 !~ /^packages\/twenty-website\// || $2 == "packages/twenty-website/package.json")')
+          count=$(grep -c . <<< "$changes" || true)
+          echo "$count arquivo(s) alterado(s) no artefato."
+          if [ "$count" -gt 3000 ]; then echo 'affected=false' >> "$GITHUB_OUTPUT"; exit 0; fi
+          { echo 'affected=true'; echo 'changes<<CHANGES_EOF'; echo "$changes"; echo 'CHANGES_EOF'; } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: source
@@ -137,25 +170,108 @@ jobs:
             src/
             !src/.git/
 
+  # Instala e compila o twenty-shared uma vez; os jobs de teste só restauram. A chave muda com o yarn.lock e com o
+  # conteúdo do twenty-shared. Sem a chave exata, parte das dependências de um yarn.lock igual salvas na main.
+  prepare:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    env:
+      CI: 'true'
+      NX_DAEMON: 'false'
+      NX_NO_CLOUD: 'true'
+      NODE_OPTIONS: --max-old-space-size=6144
+      YARN: node .yarn/releases/yarn-4.18.1.cjs
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source
+      - name: Cache key
+        id: key
+        run: |
+          lock='deps-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-'
+          { echo "lock=$lock"; echo "key=$lock${{ hashFiles('packages/twenty-shared/**') }}"; } | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: exact
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+            .yarn/install-state.gz
+          lookup-only: true
+      # A instalação do monorepo não cabe no disco livre padrão do runner.
+      - name: Free runner disk
+        if: steps.exact.outputs.cache-hit != 'true'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.exact.outputs.cache-hit != 'true'
+        with:
+          package-manager-cache: false
+          node-version-file: .nvmrc
+      # Alguns passos e o Nx esperam estar dentro de um repositório Git.
+      - name: Create a local repository
+        if: steps.exact.outputs.cache-hit != 'true'
+        run: |
+          git config --global user.name jotaduo-ci
+          git config --global user.email jotaduo-ci@users.noreply.github.com
+          git init -q -b main && git add -A && git commit -q -m "ci ${{ github.run_id }}"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.exact.outputs.cache-hit != 'true'
+        with:
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.lock }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+            .yarn/install-state.gz
+      # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.exact.outputs.cache-hit != 'true'
+        with:
+          path: ~/.yarn/berry/cache
+          key: yarn-${{ hashFiles('yarn.lock') }}
+      - name: Install dependencies
+        if: steps.exact.outputs.cache-hit != 'true'
+        run: $YARN install --immutable
+      - name: Build shared dependencies
+        if: steps.exact.outputs.cache-hit != 'true'
+        run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.exact.outputs.cache-hit != 'true'
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+            .yarn/install-state.gz
+
   tests:
     name: ${{ matrix.suite }}
-    needs: fetch
+    needs: [fetch, prepare]
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
+          # As suítes com selector passam pelo run-affected-tests.sh da origem, que escolhe o que rodar.
           - suite: shared
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run shared full
+            selector: true
           - suite: frontend
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run frontend full
+            selector: true
           - suite: server
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run server full
+            selector: true
           - suite: ui
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run ui full
+            selector: true
           - suite: cli
-            command: bash packages/twenty-utils/ci/run-affected-tests.sh run cli full
+            selector: true
           - suite: typecheck-server
             command: $YARN nx typecheck twenty-server --skip-nx-cache
           - suite: typecheck-front
@@ -171,37 +287,82 @@ jobs:
       NX_NO_CLOUD: 'true'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
-      # A instalação do monorepo não cabe no disco livre padrão do runner.
-      - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: source
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          package-manager-cache: false
-          node-version-file: .nvmrc
-      # Alguns testes e o Nx esperam estar dentro de um repositório Git.
+      # Alguns testes, o Nx e o seletor esperam estar dentro de um repositório Git.
       - name: Create a local repository
         run: |
           git config --global user.name jotaduo-ci
           git config --global user.email jotaduo-ci@users.noreply.github.com
           git init -q -b main && git add -A && git commit -q -m "ci ${{ github.run_id }}"
-      # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # O seletor compara <base> com HEAD por git diff --name-only e --diff-filter=D. Sem o histórico, monta uma base
+      # que difere do HEAD só nos caminhos da lista: os alterados e criados saem dela, os apagados entram vazios.
+      - name: Recreate the pull request base
+        if: matrix.selector && needs.fetch.outputs.affected == 'true'
+        env:
+          CHANGES: ${{ needs.fetch.outputs.changes }}
+        run: |
+          export GIT_INDEX_FILE="$RUNNER_TEMP/base-index"
+          git read-tree HEAD
+          empty=$(git hash-object -w --stdin < /dev/null)
+          while IFS=$'\t' read -r status path; do
+            [ -n "$path" ] || continue
+            if [ "$status" = D ]; then
+              git update-index --add --cacheinfo "100644,$empty,$path"
+            else
+              git update-index --force-remove -- "$path"
+            fi
+          done <<< "$CHANGES"
+          echo "TEST_BASE=$(git commit-tree "$(git write-tree)" -m base)" >> "$GITHUB_ENV"
+      - name: Plan ${{ matrix.suite }}
+        id: plan
+        env:
+          SUITE: ${{ matrix.suite }}
+          USE_SELECTOR: ${{ matrix.selector }}
+        run: |
+          if [ "$USE_SELECTOR" = true ]; then
+            git diff --name-only "${TEST_BASE:-full}" HEAD 2>/dev/null | sed 's/^/alterado: /' || true
+            scope=$(bash "$SELECTOR" plan "$SUITE" "${TEST_BASE:-full}")
+          else
+            scope=full
+          fi
+          echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
+      # A instalação restaurada não cabe no disco livre padrão do runner.
+      - name: Free runner disk
+        if: steps.plan.outputs.scope != 'none'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.plan.outputs.scope != 'none'
         with:
-          path: ~/.yarn/berry/cache
-          key: yarn-${{ hashFiles('yarn.lock') }}
-      - name: Install dependencies
-        run: $YARN install --immutable
-      - name: Build shared dependencies
-        run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
-      - name: Run ${{ matrix.suite }}
-        run: ${{ matrix.command }}
+          package-manager-cache: false
+          node-version-file: .nvmrc
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.plan.outputs.scope != 'none'
+        with:
+          key: ${{ needs.prepare.outputs.key }}
+          fail-on-cache-miss: true
+          path: |
+            node_modules
+            packages/*/node_modules
+            packages/twenty-shared
+            .yarn/install-state.gz
+      - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
+        env:
+          SUITE: ${{ matrix.suite }}
+          USE_SELECTOR: ${{ matrix.selector }}
+          COMMAND: ${{ matrix.command }}
+        run: |
+          if [ "$USE_SELECTOR" = true ]; then
+            bash "$SELECTOR" run "$SUITE" "${TEST_BASE:-full}"
+          else
+            eval "$COMMAND"
+          fi
 
   report:
-    needs: [start, fetch, tests]
+    needs: [start, fetch, prepare, tests]
     # Sempre roda, para o check aberto em "start" não ficar em andamento.
     if: ${{ always() && needs.start.outputs.sha != '' }}
     runs-on: ubuntu-latest
@@ -221,10 +382,10 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ needs.start.outputs.sha }}
           CHECK: ${{ needs.start.outputs.check }}
-          OK: ${{ needs.fetch.result == 'success' && needs.tests.result == 'success' }}
+          OK: ${{ needs.fetch.result == 'success' && needs.prepare.result == 'success' && needs.tests.result == 'success' }}
           CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SUMMARY: 'fetch: ${{ needs.fetch.result }}; testes: ${{ needs.tests.result }}'
+          SUMMARY: 'fetch: ${{ needs.fetch.result }}; preparo: ${{ needs.prepare.result }}; testes: ${{ needs.tests.result }}'
         run: |
           conclusion=failure
           [ "$CANCELLED" = true ] && conclusion=cancelled
