@@ -120,8 +120,6 @@ jobs:
             !/.vscode/
             !/deploy/
             !/docs/
-            !/packages/twenty-docs/*
-            /packages/twenty-docs/package.json
             !/packages/twenty-website/*
             /packages/twenty-website/package.json
       - name: Check the source arrived
