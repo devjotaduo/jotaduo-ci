@@ -86,6 +86,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ci
+    outputs:
+      prepared_key: ${{ steps.key.outputs.value }}
     steps:
       - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app
@@ -141,6 +143,10 @@ jobs:
           done | jq -s 'add' > changes.json
           # A API corta a lista em 300 arquivos: a partir daí as suítes rodam inteiras.
           if [ "$(jq length changes.json)" -lt 300 ]; then mv changes.json src/.ci-changes.json; fi
+      # O prepare só baixa o artefato quando esta chave ainda não está no cache.
+      - name: Compute preparation key
+        id: key
+        run: echo "value=prepared-v2-${{ runner.os }}-$(tr -d '[:space:]' < src/.nvmrc)-${{ hashFiles('src/yarn.lock', 'src/.yarnrc.yml', 'src/.yarn/releases/**', 'src/package.json', 'src/packages/*/package.json', 'src/packages/twenty-shared/**') }}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: source
@@ -152,37 +158,35 @@ jobs:
             !src/.git/
 
   # Instala as dependências e compila o twenty-shared uma vez por combinação de lockfile e fontes do shared.
+  # Instala as dependências e compila o twenty-shared uma vez por combinação de lockfile e fontes do shared.
   prepare:
     needs: fetch
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    outputs:
-      key: ${{ steps.key.outputs.value }}
     env:
       NX_DAEMON: 'false'
       NX_NO_CLOUD: 'true'
       YARN: node .yarn/releases/yarn-4.18.1.cjs
+      PREPARED_KEY: ${{ needs.fetch.outputs.prepared_key }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: source
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        id: node
-        with:
-          package-manager-cache: false
-          node-version-file: .nvmrc
-      - name: Compute preparation key
-        id: key
-        run: echo "value=prepared-v1-${{ runner.os }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('yarn.lock', '.yarnrc.yml', '.yarn/releases/**', 'package.json', 'packages/*/package.json', 'packages/twenty-shared/**') }}" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: prepared
         with:
           lookup-only: true
-          key: ${{ steps.key.outputs.value }}
+          key: ${{ env.PREPARED_KEY }}
           path: |
             node_modules
             packages/*/node_modules
             packages/twenty-shared
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.prepared.outputs.cache-hit != 'true'
+        with:
+          name: source
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.prepared.outputs.cache-hit != 'true'
+        with:
+          package-manager-cache: false
+          node-version-file: .nvmrc
       # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.prepared.outputs.cache-hit != 'true'
@@ -202,14 +206,14 @@ jobs:
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: steps.prepared.outputs.cache-hit != 'true'
         with:
-          key: ${{ steps.key.outputs.value }}
+          key: ${{ env.PREPARED_KEY }}
           path: |
             node_modules
             packages/*/node_modules
             packages/twenty-shared
 
   tests:
-    name: ${{ matrix.suite }}
+    name: ${{ matrix.suite }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }}
     needs: [start, fetch, prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -219,7 +223,13 @@ jobs:
         include:
           - suite: shared
           - suite: frontend
+          # O test:ci do servidor usa um worker só; três partes em runners separados dividem os 17 minutos.
           - suite: server
+            shard: 1/3
+          - suite: server
+            shard: 2/3
+          - suite: server
+            shard: 3/3
           - suite: ui
           - suite: cli
           # Typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
@@ -320,16 +330,19 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
           COMMAND: ${{ matrix.command }}
+          SHARD: ${{ matrix.shard }}
           TEST_BASE: ${{ steps.repository.outputs.base }}
         run: |
           scope=full
           if [ -z "$COMMAND" ]; then scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE"); fi
+          # Testes relacionados são poucos: rodam só na primeira parte.
+          if [ -n "$SHARD" ] && [ "$scope" != full ] && [ "${SHARD%%/*}" != 1 ]; then scope=none; fi
           echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: prepared
         if: steps.plan.outputs.scope != 'none'
         with:
-          key: ${{ needs.prepare.outputs.key }}
+          key: ${{ needs.fetch.outputs.prepared_key }}
           path: |
             node_modules
             packages/*/node_modules
@@ -340,12 +353,17 @@ jobs:
       - name: Build shared dependencies
         if: steps.plan.outputs.scope != 'none' && steps.prepared.outputs.cache-hit != 'true'
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
-      - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
-        if: matrix.command == ''
+      - name: Run ${{ matrix.suite }} ${{ matrix.shard }} (${{ steps.plan.outputs.scope }})
+        if: matrix.command == '' && !(matrix.shard && steps.plan.outputs.scope == 'full')
         env:
           SUITE: ${{ matrix.suite }}
           TEST_BASE: ${{ steps.repository.outputs.base }}
         run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
+      - name: Run ${{ matrix.suite }} ${{ matrix.shard }} (full)
+        if: matrix.shard && steps.plan.outputs.scope == 'full'
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: $YARN nx run twenty-server:test:ci --skip-nx-cache --parallel=1 -- --shard="$SHARD"
       - name: Run ${{ matrix.suite }}
         if: matrix.command != ''
         run: ${{ matrix.command }}

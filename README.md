@@ -17,7 +17,8 @@ gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f sha=<40 caracteres>
 - `start` abre o check run `ci-publico` em andamento no commit do pull request.
 - `fetch` gera um token de curta duração do GitHub App `kit-agentes-ci` (id 5895369, só `contents: read`), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes e `twenty-website` (dele só o `package.json`; o `twenty-docs` entra porque um teste do servidor lê os guias de UI) e envia o resto como artefato. Ele não executa nada do que baixa.
 - No modo `affected`, o `fetch` também lê da API a lista de arquivos do diff (nomes e estados) e a põe no artefato.
-- `prepare` instala as dependências e compila o `twenty-shared` uma vez por combinação de lockfile e fontes do shared, e guarda o resultado no cache do Actions. Sem acerto, cada job de teste instala e compila por conta própria.
+- `fetch` calcula a chave do preparo a partir dos fontes. `prepare` consulta o cache com ela e, só sem acerto, baixa o artefato, instala as dependências, compila o `twenty-shared` e grava o resultado. Sem acerto no job de teste, ele instala e compila por conta própria.
+- A suíte `server` roda em três partes (`--shard`), porque o `test:ci` do servidor usa um worker só. No modo `affected`, os testes relacionados rodam só na primeira parte.
 - Os jobs de teste (`shared`, `frontend`, `server`, `ui`, `cli`, `typecheck-*`, `lint-*`) recebem o artefato e não referenciam segredo nenhum. As suítes rodam pelo `packages/twenty-utils/ci/run-affected-tests.sh` da origem. No modo `affected`, cada job cria um commit base local que difere do testado exatamente nos caminhos da lista, e o seletor escolhe entre nada, testes relacionados e a suíte inteira. Um arquivo renomeado conta como apagado, o que leva à suíte inteira do pacote. Typecheck e lint rodam sempre inteiros.
 - `report` conclui o `ci-publico` com success, failure ou cancelled. O `hosted-tests` do privado espera esse check.
 
