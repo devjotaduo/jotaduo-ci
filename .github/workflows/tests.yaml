@@ -39,6 +39,7 @@ jobs:
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
       sha: ${{ steps.ref.outputs.sha }}
+      check_sha: ${{ steps.head.outputs.sha }}
       base: ${{ steps.ref.outputs.base }}
       check: ${{ steps.check.outputs.id }}
     steps:
@@ -67,11 +68,26 @@ jobs:
           owner: ${{ env.SOURCE_OWNER }}
           repositories: ${{ env.SOURCE_REPO }}
           permission-checks: write
+          permission-contents: read
+      # O GitHub só liga ao pull request um check publicado no head dele, não no commit de merge.
+      - name: Resolve check commit
+        id: head
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ steps.ref.outputs.sha }}
+          BASE: ${{ steps.ref.outputs.base }}
+        run: |
+          head=$SHA
+          if [ "$BASE" != full ]; then
+            head=$(gh api "repos/$SOURCE_OWNER/$SOURCE_REPO/commits/$SHA" --jq '.parents[1].sha // empty')
+            [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo 'o commit informado não é um merge de pull request' >&2; exit 1; }
+          fi
+          echo "sha=$head" >> "$GITHUB_OUTPUT"
       - name: Open check run
         id: check
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          SHA: ${{ steps.ref.outputs.sha }}
+          SHA: ${{ steps.head.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           id="$(gh api "repos/$SOURCE_OWNER/$SOURCE_REPO/check-runs" \
@@ -371,7 +387,7 @@ jobs:
   report:
     needs: [start, fetch, prepare, tests]
     # Sempre roda, para o check aberto em "start" não ficar em andamento.
-    if: ${{ always() && needs.start.outputs.sha != '' }}
+    if: ${{ always() && needs.start.outputs.check_sha != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: ci
@@ -387,7 +403,7 @@ jobs:
       - name: Publish check run
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          SHA: ${{ needs.start.outputs.sha }}
+          SHA: ${{ needs.start.outputs.check_sha }}
           CHECK: ${{ needs.start.outputs.check }}
           OK: ${{ needs.fetch.result == 'success' && needs.prepare.result == 'success' && needs.tests.result == 'success' }}
           CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
