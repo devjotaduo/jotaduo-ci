@@ -1,263 +1,250 @@
+# Testes do fork devjotaduo/jotaduo-v0.01 em runners do GitHub. Este repositório guarda só o workflow: o código
+# vem do repositório privado com um token curto do GitHub App e o resultado volta ao commit do pull request como o
+# check run "ci-publico". A chave do App só existe em "start", "fetch" e "report", que não executam o código baixado;
+# os jobs de teste recebem os arquivos por artefato (público por um dia) e não referenciam segredo nenhum.
 name: Tests
 
 on:
+  # run/pr-<n>-<sha>-<execução>-<tentativa> testa o merge do PR; run/affected-merge-pr-<n>-<sha>-... testa o próprio sha.
+  # Só a chave de deploy CI_TRIGGER_KEY do repositório privado cria essas branches.
   push:
     branches:
       - 'run/**'
   workflow_dispatch:
     inputs:
-      ref:
-        description: Branch, tag ou commit do repositório de origem
+      sha:
+        description: Commit do repositório privado (40 caracteres hexadecimais)
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
+  group: tests-${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
   cancel-in-progress: true
 
-run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
+run-name: Tests ${{ github.event_name == 'push' && github.ref_name || inputs.sha }}
+
+env:
+  SOURCE_OWNER: devjotaduo
+  SOURCE_REPO: jotaduo-v0.01
+  APP_ID: 5895369
+  CHECK_TITLE: shared, frontend, server, ui, cli, typecheck e lint
 
 jobs:
-  plan:
-    runs-on: [self-hosted, linux, x64, jotaduo-ci]
+  start:
+    runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: ci
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
-      base: ${{ steps.ref.outputs.base }}
-      cache_nonce: ${{ steps.ref.outputs.cache_nonce }}
+      sha: ${{ steps.ref.outputs.sha }}
+      check: ${{ steps.check.outputs.id }}
     steps:
       - name: Resolve source ref
         id: ref
         env:
           EVENT_NAME: ${{ github.event_name }}
           TRIGGER_BRANCH: ${{ github.ref_name }}
-          INPUT_REF: ${{ inputs.ref }}
+          INPUT_SHA: ${{ inputs.sha }}
         run: |
-          # Um push em run/pr-<número>-<commit>-<execução>-<tentativa> pede o teste do merge desse pull request.
-          # Com run/affected-pr-..., só os testes que o diff do pull request alcança.
-          echo "cache_nonce=$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
           if [ "$EVENT_NAME" = push ]; then
             if [[ "$TRIGGER_BRANCH" =~ ^run/affected-merge-pr-[0-9]+-([0-9a-f]{40})-[0-9]+-[0-9]+$ ]]; then
-              echo "ref=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-              echo 'base=HEAD^1' >> "$GITHUB_OUTPUT"
-            elif [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-[0-9a-f]{40}(-[0-9]+-[0-9]+)?$ ]]; then
-              echo "ref=refs/pull/${BASH_REMATCH[2]}/merge" >> "$GITHUB_OUTPUT"
-              if [ -n "${BASH_REMATCH[1]}" ]; then echo 'base=HEAD^1'; else echo 'base=full'; fi >> "$GITHUB_OUTPUT"
+              sha=${BASH_REMATCH[1]}; ref=$sha
+            elif [[ "$TRIGGER_BRANCH" =~ ^run/(affected-)?pr-([0-9]+)-([0-9a-f]{40})(-[0-9]+-[0-9]+)?$ ]]; then
+              sha=${BASH_REMATCH[3]}; ref=refs/pull/${BASH_REMATCH[2]}/merge
             else
-              echo 'Branch de disparo inválida.' >&2
-              exit 1
+              echo 'Branch de disparo inválida.' >&2; exit 1
             fi
           else
-            echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
-            echo 'base=full' >> "$GITHUB_OUTPUT"
+            [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha inválido' >&2; exit 1; }
+            sha=$INPUT_SHA; ref=$INPUT_SHA
           fi
+          { echo "sha=$sha"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: app
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_OWNER }}
+          repositories: ${{ env.SOURCE_REPO }}
+          permission-checks: write
+      - name: Open check run
+        id: check
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ steps.ref.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          id="$(gh api "repos/$SOURCE_OWNER/$SOURCE_REPO/check-runs" \
+            -f name=ci-publico -f head_sha="$SHA" -f status=in_progress -f details_url="$RUN_URL" \
+            -f "output[title]=$CHECK_TITLE" -f "output[summary]=Em andamento." --jq .id)"
+          [[ "$id" =~ ^[0-9]+$ ]] || { echo 'resposta sem id do check'; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  # Único job que lê o repositório privado. Não executa nada do que baixa.
+  fetch:
+    needs: start
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ci
+    steps:
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: app
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_OWNER }}
+          repositories: ${{ env.SOURCE_REPO }}
+          permission-contents: read
+      # Planos, deploy, workflows e instruções de agentes não entram no artefato público.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_OWNER }}/${{ env.SOURCE_REPO }}
+          ref: ${{ needs.start.outputs.ref }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+          path: src
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/.agent-flow/
+            !/.agent-kit/
+            !/.agents/
+            !/.claude/
+            !/.codex/
+            !/.concord/
+            !/.github/
+            !/.mcp.json
+            !/.vscode/
+            !/deploy/
+            !/docs/
+            !/packages/twenty-docs/*
+            /packages/twenty-docs/package.json
+            !/packages/twenty-website/*
+            /packages/twenty-website/package.json
+      - name: Check the source arrived
+        run: test -f src/yarn.lock && test -d src/packages/twenty-server && test ! -e src/deploy && test ! -e src/docs
+      # O upload segue links: um link no commit levaria arquivos do runner para o artefato público.
+      - name: Refuse symbolic links
+        run: '[ -z "$(find src -path src/.git -prune -o -type l -print)" ] || { echo "link simbólico no commit"; exit 1; }'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source
+          retention-days: 1
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            src/
+            !src/.git/
 
   tests:
     name: ${{ matrix.suite }}
-    needs: plan
-    runs-on: [self-hosted, linux, x64, "${{ matrix.runner_label || 'jotaduo-ci' }}"]
+    needs: fetch
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Duas instalações do monorepo cabem no volume atual com margem; três
-      # chegaram a esgotar o disco do host durante o link do Yarn.
-      max-parallel: 2
       matrix:
         include:
-          - suite: overlays
-            command: |
-              result=0
-              node packages/twenty-utils/overlays/overlays.mjs status || result=1
-              node packages/twenty-utils/overlays/overlays.mjs check --all || result=1
-              exit "$result"
           - suite: shared
-            command: $YARN nx test twenty-shared --ci --maxWorkers=2 --coverage=false --skip-nx-cache --parallel=1
+            command: bash packages/twenty-utils/ci/run-affected-tests.sh run shared full
           - suite: frontend
-            command: $YARN nx test twenty-front --ci --maxWorkers=4 --coverage=false --skip-nx-cache --parallel=1
+            command: bash packages/twenty-utils/ci/run-affected-tests.sh run frontend full
           - suite: server
-            command: $YARN nx run twenty-server:test:ci --skip-nx-cache --parallel=1
+            command: bash packages/twenty-utils/ci/run-affected-tests.sh run server full
           - suite: ui
-            command: |
-              $YARN nx run-many --projects=twenty-ui --targets=check:ownership,test:exports --skip-nx-cache --parallel=1
-              $YARN workspace twenty-ui vitest run --project unit --maxWorkers=4
-          # Mesmos passos do ci-cli.yaml do upstream, sem o registro local e o app de ponta a ponta.
-          # O pacote twenty-cli se chama "twenty".
+            command: bash packages/twenty-utils/ci/run-affected-tests.sh run ui full
           - suite: cli
-            command: |
-              $YARN nx run-many --target=build --projects=twenty-sdk,twenty-cli --skip-nx-cache --parallel=1
-              $YARN nx lint twenty-cli --skip-nx-cache
-              $YARN nx typecheck twenty-cli --skip-nx-cache
-              $YARN workspace twenty vitest run --maxWorkers=2 --exclude src/app/manifest/__tests__/manifest-fixtures.spec.ts
-              $YARN workspace twenty vitest run --maxWorkers=1 src/app/manifest/__tests__/manifest-fixtures.spec.ts
-          # Fora do seletor: typecheck e lint olham os pacotes inteiros, não só o que o diff alcança.
-          - suite: typecheck
-            runner_label: jotaduo-ci-heavy
-            selector: false
-            command: GOMEMLIMIT=8GiB GOMAXPROCS=1 $YARN nx run-many --targets=typecheck --projects=twenty-server,twenty-front --skip-nx-cache --parallel=1 --args=--singleThreaded
-          # lint:unlocalized-strings do front já falha na main da origem e bloquearia o oxlint, que depende dele.
-          - suite: lint
-            runner_label: jotaduo-ci-heavy
-            selector: false
-            command: |
-              $YARN nx build twenty-oxlint-rules --skip-nx-cache --parallel=1
-              GOMEMLIMIT=8GiB GOMAXPROCS=1 $YARN nx run-many --targets=lint --projects=twenty-server,twenty-front --exclude-task-dependencies --skip-nx-cache --parallel=1
+            command: bash packages/twenty-utils/ci/run-affected-tests.sh run cli full
+          - suite: typecheck-server
+            command: $YARN nx typecheck twenty-server --skip-nx-cache
+          - suite: typecheck-front
+            command: $YARN nx typecheck twenty-front --skip-nx-cache
+          # lint:unlocalized-strings do front já falha na main e bloquearia o oxlint, que depende dele.
+          - suite: lint-server
+            command: $YARN nx build twenty-oxlint-rules --skip-nx-cache && $YARN nx lint twenty-server --exclude-task-dependencies --skip-nx-cache
+          - suite: lint-front
+            command: $YARN nx build twenty-oxlint-rules --skip-nx-cache && $YARN nx lint twenty-front --exclude-task-dependencies --skip-nx-cache
     env:
       CI: 'true'
       NX_DAEMON: 'false'
       NX_NO_CLOUD: 'true'
-      NX_PARALLEL: '1'
       NODE_OPTIONS: --max-old-space-size=6144
       YARN: node .yarn/releases/yarn-4.18.1.cjs
-      TEST_BASE: ${{ needs.plan.outputs.base }}
-      SELECTOR: packages/twenty-utils/ci/run-affected-tests.sh
     steps:
-      - name: Prepare cache helper from the public workflow revision
-        id: cache_tool
-        run: |
-          control=$(mktemp -d "${RUNNER_TEMP:?}/ci-preparation.XXXXXXXX")
-          echo "path=$control" >> "$GITHUB_OUTPUT"
-          if curl --proto '=https' --fail --silent --show-error --retry 2 --max-time 20 \
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_WORKFLOW_SHA/.github/scripts/prepared-cache.py" \
-              -o "$control/cache"; then
-            chmod 700 "$control/cache"
-          else
-            echo 'Cache helper unavailable. Using fresh preparation.'
-          fi
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A instalação do monorepo não cabe no disco livre padrão do runner.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          repository: devjotaduo/jotaduo-v0.01
-          ref: ${{ needs.plan.outputs.ref }}
-          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Rotate this runner's private cache
-        id: cache_start
-        env:
-          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
-          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
-        run: |
-          if [ -x "$CACHE_TOOL/cache" ] && "$CACHE_TOOL/cache" begin; then
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          else
-            # A cold fallback must discard the previous generation before executing source scripts.
-            slot="/tmp/jotaduo-ci-prepared-$(id -u)"
-            if [ -d "$slot" ] && [ ! -L "$slot" ] && [ -O "$slot" ]; then
-              flock --exclusive "$slot" rm -f -- "$slot"/{prepared.tar.zst,prepared.json,creating.tar.zst,bypass,slot}
-            fi
-          fi
-      - name: Plan ${{ matrix.suite }}
-        id: plan
-        env:
-          SUITE: ${{ matrix.suite }}
-          # Chave ausente chega vazia; só selector: false desliga o seletor.
-          USE_SELECTOR: ${{ matrix.selector }}
-        run: |
-          # Uma linha sem o seletor, um seletor que ainda não conhece a suíte (como cli antes do
-          # local-ci v25) ou uma suíte com selector: false roda a suíte inteira pelo comando da matriz.
-          if [ -f "$SELECTOR" ] && [ "$USE_SELECTOR" != false ] && grep -qE "^[[:space:]]+$SUITE\)" "$SELECTOR"; then
-            scope=$(bash "$SELECTOR" plan "$SUITE" "$TEST_BASE")
-          else
-            scope=legacy
-          fi
-          echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
-      - name: Prepare package temporary directory
-        id: package_temp
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
-        run: |
-          package_temp=$(mktemp -d "${RUNNER_TEMP:?}/yarn-tmp.XXXXXXXX")
-          echo "path=$package_temp" >> "$GITHUB_OUTPUT"
-          # Nx resolve NX_PROFILE a partir da raiz do checkout.
-          echo "nx_profile=$(realpath --relative-to="$PWD" "$package_temp/nx-profile.json")" >> "$GITHUB_OUTPUT"
-          echo "TMPDIR=$package_temp" >> "$GITHUB_ENV"
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          name: source
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           package-manager-cache: false
           node-version-file: .nvmrc
-      - name: Restore prepared dependencies and shared build
-        id: restore
-        if: steps.cache_start.outputs.ready == 'true' && matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none'
-        env:
-          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
-          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
+      # Alguns testes e o Nx esperam estar dentro de um repositório Git.
+      - name: Create a local repository
         run: |
-          if ! "$CACHE_TOOL/cache" restore; then
-            # A killed helper can leave a partial tree. A failed rollback must fail the job.
-            git reset --hard --quiet HEAD
-            git clean -ffdxq
-            echo 'hit=false' >> "$GITHUB_OUTPUT"
-          fi
+          git config --global user.name jotaduo-ci
+          git config --global user.email jotaduo-ci@users.noreply.github.com
+          git init -q -b main && git add -A && git commit -q -m "ci ${{ github.run_id }}"
+      # A chave é o yarn.lock: com --immutable o Yarn confere cada pacote contra os checksums dele.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.yarn/berry/cache
+          key: yarn-${{ hashFiles('yarn.lock') }}
       - name: Install dependencies
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
-        run: $YARN install --immutable --check-cache
+        run: $YARN install --immutable
       - name: Build shared dependencies
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
-        env:
-          NX_PROFILE: ${{ steps.package_temp.outputs.nx_profile }}
         run: $YARN nx build twenty-shared --skip-nx-cache --parallel=1
-      - name: Save successful preparation
-        if: matrix.suite != 'overlays' && steps.plan.outputs.scope != 'none' && steps.restore.outputs.hit != 'true'
-        env:
-          CACHE_TOOL: ${{ steps.cache_tool.outputs.path }}
-          CACHE_NONCE: ${{ needs.plan.outputs.cache_nonce }}
-        run: |
-          profile="$TMPDIR/nx-profile.json"
-          if [ -s "$profile" ] && jq -e 'any(.[]; .ph == "X" and .args.status != "success")' "$profile" >/dev/null; then
-            echo 'Nx reported an incomplete shared build.' >&2
-            exit 1
-          fi
-          if [ "${{ steps.cache_start.outputs.ready }}" = true ] && [ -s "$profile" ] && jq -e 'any(.[]; .name == "twenty-shared:build" and .args.status == "success")' "$profile" >/dev/null; then
-            "$CACHE_TOOL/cache" save || echo 'Preparation cache unavailable. Continuing with the fresh build.'
-          fi
       - name: Run ${{ matrix.suite }}
-        if: steps.plan.outputs.scope == 'legacy'
-        env:
-          NX_PROFILE: ${{ matrix.runner_label == 'jotaduo-ci-heavy' && steps.package_temp.outputs.nx_profile || '' }}
         run: ${{ matrix.command }}
-      - name: Verify both ${{ matrix.suite }} targets completed
-        if: matrix.runner_label == 'jotaduo-ci-heavy'
+
+  report:
+    needs: [start, fetch, tests]
+    # Sempre roda, para o check aberto em "start" não ficar em andamento.
+    if: ${{ always() && needs.start.outputs.sha != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ci
+    steps:
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: app
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ env.SOURCE_OWNER }}
+          repositories: ${{ env.SOURCE_REPO }}
+          permission-checks: write
+      - name: Publish check run
         env:
-          SUITE: ${{ matrix.suite }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ needs.start.outputs.sha }}
+          CHECK: ${{ needs.start.outputs.check }}
+          OK: ${{ needs.fetch.result == 'success' && needs.tests.result == 'success' }}
+          CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SUMMARY: 'fetch: ${{ needs.fetch.result }}; testes: ${{ needs.tests.result }}'
         run: |
-          # Nx pode retornar zero quando o sistema interrompe uma tarefa filha.
-          jq -e --arg suite "$SUITE" '
-            map(select(.ph == "X")) |
-            all(.args.status == "success") and
-            any(.name == ("twenty-front:" + $suite)) and
-            any(.name == ("twenty-server:" + $suite))
-          ' "$TMPDIR/nx-profile.json"
-      - name: Run ${{ matrix.suite }} (${{ steps.plan.outputs.scope }})
-        if: steps.plan.outputs.scope != 'legacy'
-        env:
-          SUITE: ${{ matrix.suite }}
-        run: bash "$SELECTOR" run "$SUITE" "$TEST_BASE"
-      - name: Release package temporary directory
-        if: always() && steps.package_temp.outputs.path != ''
-        env:
-          PACKAGE_TEMP: ${{ steps.package_temp.outputs.path }}
-        run: |
-          if [ -d "$PACKAGE_TEMP" ]; then
-            find "$PACKAGE_TEMP" -xdev -depth -delete
-          fi
-      - name: Release cache helper
-        if: always() && steps.cache_tool.outputs.path != ''
-        env:
-          CONTROL: ${{ steps.cache_tool.outputs.path }}
-        run: rm -f -- "$CONTROL/cache" && rmdir -- "$CONTROL"
-      - name: Release workspace disk
-        if: always()
-        # O checkout é efêmero. Mantém o repositório, mas remove dependências,
-        # caches e artefatos ignorados antes de liberar o runner para outra suíte.
-        run: git clean -ffdx
+          conclusion=failure
+          [ "$CANCELLED" = true ] && conclusion=cancelled
+          [ "$OK" = true ] && conclusion=success
+          target=(-X POST "repos/$SOURCE_OWNER/$SOURCE_REPO/check-runs" -f head_sha="$SHA")
+          if [[ "$CHECK" =~ ^[0-9]+$ ]]; then target=(-X PATCH "repos/$SOURCE_OWNER/$SOURCE_REPO/check-runs/$CHECK"); fi
+          for try in 1 2 3; do
+            gh api "${target[@]}" -f name=ci-publico -f status=completed -f conclusion="$conclusion" \
+              -f details_url="$RUN_URL" -f "output[title]=$CHECK_TITLE" -f "output[summary]=$SUMMARY" > /dev/null && break
+            [ "$try" = 3 ] && { echo 'não foi possível concluir o check ci-publico'; exit 1; }
+            sleep 10
+          done
+          echo "ci-publico: $conclusion em $SHA"
 
   cleanup:
-    needs: tests
+    needs: report
     if: always() && github.event_name == 'push'
-    runs-on: [self-hosted, linux, x64, jotaduo-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
