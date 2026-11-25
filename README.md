@@ -9,7 +9,7 @@ O repositório privado só consegue criar branches aqui, com a chave de deploy `
 - Para um teste manual de um commit:
 
 ```bash
-gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f sha=<40 caracteres>
+gh workflow run tests.yaml --repo jotaduo2-eng/jotaduo-ci -f sha=<40 caracteres>
 ```
 
 ## Como o código chega e o resultado volta
