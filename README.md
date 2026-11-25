@@ -15,7 +15,7 @@ gh workflow run tests.yaml --repo devjotaduo/jotaduo-ci -f sha=<40 caracteres>
 ## Como o código chega e o resultado volta
 
 - `start` abre o check run `ci-publico` em andamento no head do pull request; no disparo `affected-merge`, o head é o segundo pai do commit de merge informado.
-- `fetch` gera um token de curta duração do GitHub App `kit-agentes-ci` (id 5895369, só `contents: read`), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes e `twenty-website` (dele só o `package.json`; o `twenty-docs` entra porque um teste do servidor lê os guias de UI) e envia o resto como artefato. Ele não executa nada do que baixa.
+- `fetch` gera um token de curta duração do GitHub App `jotaduo-fork-bot` (id 5912992, com `contents: read` e `checks: write` no fork), baixa o commit sem `docs/`, `deploy/`, `.github/`, instruções de agentes e `twenty-website` (dele só o `package.json`; o `twenty-docs` entra porque um teste do servidor lê os guias de UI) e envia o resto como artefato. Ele não executa nada do que baixa.
 - No modo `affected`, o `fetch` também lê da API a lista de arquivos do diff (nomes e estados) e a põe no artefato.
 - `fetch` calcula a chave do preparo a partir dos fontes. `prepare` consulta o cache com ela e, só sem acerto, baixa o artefato, instala as dependências, compila o `twenty-shared` e grava o resultado. Sem acerto no job de teste, ele instala e compila por conta própria.
 - A suíte `server` roda em três partes (`--shard`), porque o `test:ci` do servidor usa um worker só. No modo `affected`, os testes relacionados rodam só na primeira parte.
