@@ -28,7 +28,7 @@ run-name: Tests ${{ inputs.trigger || inputs.sha }}
 env:
   SOURCE_OWNER: jotaduo2-eng
   SOURCE_REPO: jotaduo-v0.01
-  APP_ID: 5895369
+  APP_ID: 5912992
   CHECK_TITLE: shared, frontend, server, ui, cli, typecheck e lint
 
 jobs:
