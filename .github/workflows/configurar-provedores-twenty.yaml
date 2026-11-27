@@ -1,0 +1,52 @@
+name: Configurar provedores do Twenty
+
+on:
+  workflow_dispatch:
+    inputs:
+      ambiente:
+        description: Ambiente que recebe a configuração
+        required: true
+        type: choice
+        options:
+          - teste
+          - homologacao
+
+permissions:
+  contents: read
+
+jobs:
+  configurar:
+    if: >-
+      github.repository == 'jotaduo2-eng/jotaduo-ci' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      (inputs.ambiente == 'teste' || inputs.ambiente == 'homologacao')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: ${{ inputs.ambiente }}
+    concurrency:
+      group: configurar-provedores-twenty-${{ inputs.ambiente }}
+      cancel-in-progress: false
+    steps:
+      - name: Obter código do espelho
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verificar o contrato de configuração
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Enviar configuração ao receptor do ambiente
+        env:
+          AMBIENTE: ${{ inputs.ambiente }}
+          LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL }}
+          LITELLM_MODELS_JSON: ${{ vars.LITELLM_MODELS_JSON }}
+          CLIPROXY_BASE_URL: ${{ vars.CLIPROXY_BASE_URL }}
+          CLIPROXY_MODELS_JSON: ${{ vars.CLIPROXY_MODELS_JSON }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          TWENTY_CONFIG_SSH_HOST: ${{ vars.TWENTY_CONFIG_SSH_HOST }}
+          TWENTY_CONFIG_SSH_KNOWN_HOSTS: ${{ vars.TWENTY_CONFIG_SSH_KNOWN_HOSTS }}
+          TWENTY_CONFIG_SSH_KEY: ${{ secrets.TWENTY_CONFIG_SSH_KEY }}
+        run: python3 -I scripts/twenty_ai_providers.py send "$AMBIENTE"
