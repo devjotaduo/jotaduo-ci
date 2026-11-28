@@ -7,7 +7,9 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from http.client import BadStatusLine
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import twenty_ai_providers as providers
@@ -84,18 +86,37 @@ class PayloadTest(unittest.TestCase):
 
 
 class ReceiverTest(unittest.TestCase):
+    def test_receiver_selects_the_authorized_file_group_for_each_environment(self):
+        payload = providers.checked_payload(CONFIG)
+        for environment, expected_gid in (("teste", 0), ("homologacao", 987)):
+            with (
+                self.subTest(environment=environment),
+                patch.object(providers.os, "geteuid", return_value=0),
+                patch.object(providers.signal, "signal"),
+                patch.object(providers.signal, "alarm"),
+                patch.object(providers.sys, "stdin", buffer=io.BytesIO(payload)),
+                patch.object(providers.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=987)) as group,
+                patch.object(providers, "write_configuration") as write,
+            ):
+                providers.receive(environment)
+                write.assert_called_once_with(providers.ENVIRONMENTS[environment][1], payload, expected_gid)
+                if environment == "homologacao":
+                    group.assert_called_once_with("twenty-teste")
+                else:
+                    group.assert_not_called()
+
     def test_replacement_sets_permissions_and_keeps_existing_readers_on_old_inode(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             directory.chmod(0o750)
             target = directory / "providers.json"
             before = providers.checked_payload(CONFIG)
-            providers.write_configuration(directory, before)
+            providers.write_configuration(directory, before, os.getegid())
             rotated_config = copy.deepcopy(CONFIG)
             rotated_config["litellm"]["apiKey"] = "test-rotated-key"
             after = providers.checked_payload(rotated_config)
             with target.open("rb") as reader:
-                providers.write_configuration(directory, after)
+                providers.write_configuration(directory, after, os.getegid())
                 self.assertEqual(reader.read(), before)
             self.assertEqual(json.loads(target.read_bytes()), rotated_config)
             metadata = target.stat()
@@ -107,22 +128,49 @@ class ReceiverTest(unittest.TestCase):
     def test_rejects_an_unprotected_or_symlink_receiver_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
+            directory.chmod(0o755)
             with self.assertRaises(providers.ConfigurationError):
-                providers.write_configuration(directory, b"example")
+                providers.write_configuration(directory, b"example", os.getegid())
             alias = directory / "alias"
             alias.symlink_to(directory, target_is_directory=True)
             with self.assertRaises(OSError):
-                providers.write_configuration(alias, b"example")
+                providers.write_configuration(alias, b"example", os.getegid())
+
+    def test_private_directory_can_have_different_group_from_published_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            directory.chmod(0o700)
+            info = directory.stat()
+            root_folder = SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid, st_gid=0)
+            with patch.object(providers.os, "fstat", return_value=root_folder):
+                providers.write_configuration(directory, b"example", os.getegid())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((directory / "providers.json").stat().st_gid, os.getegid())
+
+    def test_rejects_unauthorized_directory_or_file_group_before_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            directory.chmod(0o750)
+            target = directory / "providers.json"
+            target.write_bytes(b"original")
+            target.chmod(0o640)
+            for target_path, function in ((directory, "fstat"), (target, "stat")):
+                info = target_path.stat()
+                wrong_group = SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid, st_gid=os.getegid() + 1)
+                with self.subTest(target=target_path), patch.object(providers.os, function, return_value=wrong_group):
+                    with self.assertRaises(providers.ConfigurationError):
+                        providers.write_configuration(directory, b"new", os.getegid())
+                self.assertEqual(target.read_bytes(), b"original")
 
     def test_failed_replace_keeps_previous_file_and_cleans_temporary_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             directory.chmod(0o750)
             target = directory / "providers.json"
-            providers.write_configuration(directory, b"previous")
+            providers.write_configuration(directory, b"previous", os.getegid())
             with patch.object(providers.os, "replace", side_effect=OSError("injected failure")):
                 with self.assertRaises(OSError):
-                    providers.write_configuration(directory, b"new")
+                    providers.write_configuration(directory, b"new", os.getegid())
             self.assertEqual(target.read_bytes(), b"previous")
             self.assertEqual(list(directory.iterdir()), [target])
 
@@ -194,7 +242,7 @@ class TransportTest(unittest.TestCase):
             "TWENTY_CONFIG_SSH_KNOWN_HOSTS": PIN,
             "TWENTY_CONFIG_SSH_KEY": "fake-ssh-private-key",
         }
-        for failure in (IOError("synthetic private response"), io.BytesIO(b'{"data":[]}')):
+        for failure in (IOError("synthetic private response"), BadStatusLine("synthetic private response"), io.BytesIO(b'{"data":[]}')):
             with (
                 patch.object(providers, "build_opener") as build_opener,
                 patch.object(providers.subprocess, "run") as ssh,

@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import grp
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from http.client import HTTPException
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -52,7 +54,7 @@ def check_model_catalogs(payload):
             data = json.loads(body)["data"]
             if not isinstance(data, list):
                 raise ValueError
-        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        except (HTTPException, OSError, ValueError, KeyError, TypeError, RecursionError):
             raise ConfigurationError(f"Não foi possível validar o catálogo autenticado de {name}.") from None
 
         available = {
@@ -153,16 +155,31 @@ def payload_from_stream(stream):
     return checked_payload(config)
 
 
-def write_configuration(directory, payload):
+def write_configuration(directory, payload, file_gid):
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         folder = os.fstat(descriptor)
-        if folder.st_uid != os.geteuid() or stat.S_IMODE(folder.st_mode) != 0o750:
-            raise ConfigurationError("O diretório receptor precisa pertencer ao operador e ter modo 0750.")
+        if (
+            folder.st_uid != os.geteuid()
+            or folder.st_gid not in (0, file_gid)
+            or stat.S_IMODE(folder.st_mode) not in (0o700, 0o750)
+        ):
+            raise ConfigurationError("Propriedade, grupo ou modo do diretório receptor inválido.")
+        try:
+            previous = os.stat("providers.json", dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None and (
+            not stat.S_ISREG(previous.st_mode)
+            or previous.st_uid != os.geteuid()
+            or previous.st_gid != file_gid
+            or stat.S_IMODE(previous.st_mode) not in (0o600, 0o640)
+        ):
+            raise ConfigurationError("Propriedade, grupo ou modo do arquivo receptor inválido.")
         fd, temporary = tempfile.mkstemp(prefix=".providers-", dir=directory)
         try:
             with os.fdopen(fd, "wb") as file:
-                os.fchown(file.fileno(), -1, folder.st_gid)
+                os.fchown(file.fileno(), -1, file_gid)
                 file.write(payload)
                 file.flush()
                 os.fchmod(file.fileno(), 0o640)
@@ -243,7 +260,11 @@ def receive(environment):
         payload = payload_from_stream(sys.stdin.buffer)
     finally:
         signal.alarm(0)
-    write_configuration(directory, payload)
+    try:
+        file_gid = 0 if environment == "teste" else grp.getgrnam("twenty-teste").gr_gid
+    except KeyError:
+        raise ConfigurationError("O grupo do serviço de homologação precisa estar provisionado.") from None
+    write_configuration(directory, payload, file_gid)
 
 
 def main():

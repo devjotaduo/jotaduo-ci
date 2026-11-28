@@ -26,12 +26,12 @@ URLs aceitam caminho e porta HTTPS, com IDs de modelo e chaves sem espaços. Ant
 
 Um operador do host instala uma versão revisada de `scripts/twenty_ai_providers.py` em `/usr/local/libexec/twenty-ai-providers.py`, como `root:root` e modo `0644`, em diretório administrado por root. Use Python 3.12 ou posterior. Crie duas contas de sistema dedicadas sem senha, com shell `/bin/sh` para o comando forçado, sem chaves de uso geral, sem grupos de serviço ou Docker. Os destinos são fixos.
 
-| Ambiente | Conta SSH | Diretório `0750` | Arquivo `0640` |
+| Ambiente | Conta SSH | Diretório `0700` ou `0750` | Arquivo `0640` |
 | --- | --- | --- | --- |
 | Teste | `twenty-ai-config-teste` | `/etc/twenty-test-image`, `root:root` | `/etc/twenty-test-image/providers.json`, `root:root` |
-| Homologação | `twenty-ai-config-homologacao` | `/etc/twenty-teste`, `root:twenty-teste` | `/etc/twenty-teste/providers.json`, `root:twenty-teste` |
+| Homologação | `twenty-ai-config-homologacao` | `/etc/twenty-teste`, `root:root` ou `root:twenty-teste` | `/etc/twenty-teste/providers.json`, `root:twenty-teste` |
 
-Confira a propriedade e o modo do diretório existente da homologação antes de ajustá-lo e preserve o acesso do serviço aos demais arquivos. O grupo `twenty-teste` precisa corresponder ao GID efetivo do serviço. Em teste, execute a validação e instalação do fork como operador root autorizado quando usar `root:root`. Se for necessário validar como operador não root, use um grupo leitor dedicado no diretório de teste e limite sua composição aos operadores autorizados e ao GID efetivo do serviço quando aplicável.
+Preserve o diretório de homologação existente em `root:root` e modo `0700`. O receptor associa o arquivo ao grupo `twenty-teste` independentemente do grupo do diretório. O GID desse grupo deve corresponder ao GID do serviço que usa o arquivo montado. Em teste, a instalação do fork com arquivo protegido exige operador root autorizado. Antes da rotação, corrija as permissões de um arquivo anterior se o receptor recusar sua propriedade, grupo ou modo.
 
 Nos ambientes gerenciados, crie um arquivo vazio `providers.json.required`, pertencente ao root, ao lado de cada `providers.json`. Esse marcador faz o instalador do fork deter a troca quando a configuração esperada estiver ausente. Crie o marcador antes da primeira instalação gerenciada.
 
