@@ -162,7 +162,46 @@ class TransportTest(unittest.TestCase):
             "TWENTY_CONFIG_SSH_KNOWN_HOSTS": PIN,
             "TWENTY_CONFIG_SSH_KEY": "fake-ssh-private-key",
         }
-        with patch.object(providers.subprocess, "run", side_effect=run) as ssh:
+        with (
+            patch.object(providers, "check_model_catalogs") as check_catalogs,
+            patch.object(providers.subprocess, "run", side_effect=run) as ssh,
+        ):
             providers.send("homologacao", env)
+            check_catalogs.assert_called_once_with(providers.checked_payload(CONFIG))
             ssh.assert_called_once()
         self.assertFalse(key_paths[0].exists())
+
+    def test_catalog_checks_each_provider_with_its_own_key(self):
+        with patch.object(providers, "build_opener") as build_opener:
+            open_catalog = build_opener.return_value.open
+            open_catalog.side_effect = [
+                io.BytesIO(json.dumps({"data": [{"id": model} for model in provider["models"]]}).encode())
+                for provider in CONFIG.values()
+            ]
+            providers.check_model_catalogs(providers.checked_payload(CONFIG))
+
+        for call, provider in zip(open_catalog.call_args_list, CONFIG.values(), strict=True):
+            request = call.args[0]
+            self.assertEqual(request.full_url, provider["baseUrl"] + "/models")
+            self.assertEqual(request.get_header("Authorization"), f"Bearer {provider['apiKey']}")
+            self.assertEqual(call.kwargs["timeout"], 10)
+        self.assertIsNone(providers.NoCatalogRedirect().redirect_request(None, None, 302, "", {}, HOST))
+
+    def test_catalog_failure_blocks_transport_without_exposing_inputs(self):
+        env = {
+            **ENV,
+            "TWENTY_CONFIG_SSH_HOST": HOST,
+            "TWENTY_CONFIG_SSH_KNOWN_HOSTS": PIN,
+            "TWENTY_CONFIG_SSH_KEY": "fake-ssh-private-key",
+        }
+        for failure in (IOError("synthetic private response"), io.BytesIO(b'{"data":[]}')):
+            with (
+                patch.object(providers, "build_opener") as build_opener,
+                patch.object(providers.subprocess, "run") as ssh,
+            ):
+                build_opener.return_value.open.side_effect = [failure]
+                with self.assertRaises(providers.ConfigurationError) as error:
+                    providers.send("teste", env)
+                self.assertNotIn("private response", str(error.exception))
+                self.assertNotIn(CONFIG["litellm"]["apiKey"], str(error.exception))
+                ssh.assert_not_called()

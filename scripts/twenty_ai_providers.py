@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 PROVIDERS = ("litellm", "cliproxy")
@@ -20,11 +21,46 @@ ENVIRONMENTS = {
     "homologacao": ("twenty-ai-config-homologacao", Path("/etc/twenty-teste")),
 }
 MAX_PAYLOAD_BYTES = 32 * 1024
+MAX_CATALOG_BYTES = 4 * 1024 * 1024
 DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
 
 class ConfigurationError(Exception):
     """Uma falha que pode aparecer nos logs sem incluir valores de entrada."""
+
+
+class NoCatalogRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        return None
+
+
+def check_model_catalogs(payload):
+    opener = build_opener(ProxyHandler({}), NoCatalogRedirect())
+    for name, provider in json.loads(payload).items():
+        request = Request(
+            provider["baseUrl"].rstrip("/") + "/models",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {provider['apiKey']}",
+            },
+        )
+        try:
+            with opener.open(request, timeout=10) as response:
+                body = response.read(MAX_CATALOG_BYTES + 1)
+            if len(body) > MAX_CATALOG_BYTES:
+                raise ValueError
+            data = json.loads(body)["data"]
+            if not isinstance(data, list):
+                raise ValueError
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            raise ConfigurationError(f"Não foi possível validar o catálogo autenticado de {name}.") from None
+
+        available = {
+            item["id"] for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if not set(provider["models"]).issubset(available):
+            raise ConfigurationError(f"Há modelos configurados fora do catálogo autorizado de {name}.")
 
 
 def is_hostname(value):
@@ -166,6 +202,7 @@ def send(environment, env):
     private_key = env.get("TWENTY_CONFIG_SSH_KEY", "").strip()
     if not private_key:
         raise ConfigurationError("Falta a chave SSH deste ambiente.")
+    check_model_catalogs(payload)
     with tempfile.TemporaryDirectory(prefix="twenty-ai-") as tmp:
         key_path = Path(tmp) / "identity"
         pins_path = Path(tmp) / "known_hosts"

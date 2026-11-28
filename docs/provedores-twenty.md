@@ -20,7 +20,7 @@ O workflow manual **Configurar provedores do Twenty** grava a configuração des
 | Secret | `CLIPROXY_API_KEY` | Credencial de CLIProxy exclusiva do ambiente |
 | Secret | `TWENTY_CONFIG_SSH_KEY` | Chave privada OpenSSH dedicada à identidade receptora desse ambiente |
 
-URLs aceitam caminho e porta HTTPS, com IDs de modelo e chaves sem espaços. Gere um par SSH dedicado por ambiente e instale apenas a chave pública no host. Os logs do workflow mostram somente o resultado e diagnósticos sanitizados. O payload segue no stdin do SSH e a chave de transporte fica em arquivo temporário `0600` privado do job.
+URLs aceitam caminho e porta HTTPS, com IDs de modelo e chaves sem espaços. Antes do SSH, o workflow verifica os IDs no catálogo autenticado `/models` de cada proxy. Gere um par SSH dedicado por ambiente e instale apenas a chave pública no host. Os logs do workflow mostram somente o resultado e diagnósticos sanitizados. O payload segue no stdin do SSH e a chave de transporte fica em arquivo temporário `0600` privado do job.
 
 ## Receptor no jotaduo-g
 
@@ -32,6 +32,8 @@ Um operador do host instala uma versão revisada de `scripts/twenty_ai_providers
 | Homologação | `twenty-ai-config-homologacao` | `/etc/twenty-teste`, `root:twenty-teste` | `/etc/twenty-teste/providers.json`, `root:twenty-teste` |
 
 Confira a propriedade e o modo do diretório existente da homologação antes de ajustá-lo e preserve o acesso do serviço aos demais arquivos. O grupo `twenty-teste` precisa corresponder ao GID efetivo do serviço. Em teste, execute a validação e instalação do fork como operador root autorizado quando usar `root:root`. Se for necessário validar como operador não root, use um grupo leitor dedicado no diretório de teste e limite sua composição aos operadores autorizados e ao GID efetivo do serviço quando aplicável.
+
+Nos ambientes gerenciados, crie um arquivo vazio `providers.json.required`, pertencente ao root, ao lado de cada `providers.json`. Esse marcador faz o instalador do fork deter a troca quando a configuração esperada estiver ausente. Crie o marcador antes da primeira instalação gerenciada.
 
 Crie `/etc/ssh/twenty-ai-config` como `root:root` e modo `0755`. Em cada arquivo `/etc/ssh/twenty-ai-config/<conta>`, mantenha somente a chave pública do ambiente, prefixada por `restrict`. Os arquivos devem pertencer a `root:root` e ter modo `0644` para leitura pelo sshd. Adicione a configuração a seguir ao `sshd_config` ou a um include ativo.
 
