@@ -1,6 +1,6 @@
 # jotaduo-ci
 
-Espelho sem código, só para rodar os testes do repositório privado `jotaduo2-eng/jotaduo-v0.01` em runners do GitHub, que são livres em repositório público. Segue o modelo do `devjotaduo/kit-agentes-universal-ci`.
+Espelho para rodar os testes do repositório privado `jotaduo2-eng/jotaduo-v0.01` em runners do GitHub, que são livres em repositório público. Segue o modelo do `devjotaduo/kit-agentes-universal-ci`. A [configuração de provedores do Twenty](docs/provedores-twenty.md) usa um workflow manual separado.
 
 O repositório privado só consegue criar branches aqui, com a chave de deploy `CI_TRIGGER_KEY`. O job `hosted-tests` de lá empurra uma branch `run/...`; o workflow `Relay` a apaga e dispara o `Tests` a partir da `main`, para as execuções dividirem o mesmo cache do Actions.
 
